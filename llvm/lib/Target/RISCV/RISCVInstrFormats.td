@@ -114,6 +114,7 @@ def OPC_LOAD      : RISCVOpcode<0b0000011>;
 def OPC_LOAD_FP   : RISCVOpcode<0b0000111>;
 def OPC_MISC_MEM  : RISCVOpcode<0b0001111>;
 def OPC_OP_IMM    : RISCVOpcode<0b0010011>;
+def OPC_OP_MIMM   : RISCVOpcode<0b0010001>;
 def OPC_AUIPC     : RISCVOpcode<0b0010111>;
 def OPC_OP_IMM_32 : RISCVOpcode<0b0011011>;
 def OPC_STORE     : RISCVOpcode<0b0100011>;
