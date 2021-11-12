@@ -42,13 +42,7 @@ static const char *const generatedArgName = "odsArg";
 static const char *const odsBuilder = "odsBuilder";
 static const char *const builderOpState = "odsState";
 
-// Code for OpAdaptors to lookup an attribute using strings on the provided
-// DictionaryAttr.
-//
-// {0}: The attribute name.
-static const char *const adaptorGetAttr = "odsAttrs.get(\"{0}\")";
-
-// Code for Ops to lookup an attribute using the cached identifier.
+// Code for an Op to lookup an attribute. Uses cached identifiers.
 //
 // {0}: The attribute's getter name.
 static const char *const opGetAttr = "(*this)->getAttr({0}AttrName())";
@@ -63,7 +57,7 @@ static const char *const opGetAttr = "(*this)->getAttr({0}AttrName())";
 // {2}: The total number of variadic operands/results.
 // {3}: The total number of actual values.
 // {4}: "operand" or "result".
-const char *sameVariadicSizeValueRangeCalcCode = R"(
+static const char *const sameVariadicSizeValueRangeCalcCode = R"(
   bool isVariadic[] = {{{0}};
   int prevVariadicCount = 0;
   for (unsigned i = 0; i < index; ++i)
@@ -87,14 +81,15 @@ const char *sameVariadicSizeValueRangeCalcCode = R"(
 // (variadic or not).
 //
 // {0}: The name of the attribute specifying the segment sizes.
-const char *adapterSegmentSizeAttrInitCode = R"(
+static const char *const adapterSegmentSizeAttrInitCode = R"(
   assert(odsAttrs && "missing segment size attribute for op");
   auto sizeAttr = odsAttrs.get("{0}").cast<::mlir::DenseIntElementsAttr>();
 )";
-const char *opSegmentSizeAttrInitCode = R"(
-  auto sizeAttr = (*this)->getAttr({0}).cast<::mlir::DenseIntElementsAttr>();
+static const char *const opSegmentSizeAttrInitCode = R"(
+  auto sizeAttr =
+      (*this)->getAttr({0}AttrName()).cast<::mlir::DenseIntElementsAttr>();
 )";
-const char *attrSizedSegmentValueRangeCalcCode = R"(
+static const char *const attrSizedSegmentValueRangeCalcCode = R"(
   const uint32_t *sizeAttrValueIt = &*sizeAttr.value_begin<uint32_t>();
   if (sizeAttr.isSplat())
     return {*sizeAttrValueIt * index, *sizeAttrValueIt};
@@ -109,7 +104,7 @@ const char *attrSizedSegmentValueRangeCalcCode = R"(
 //
 // {0}: The name of the segment attribute.
 // {1}: The index of the main operand.
-const char *variadicOfVariadicAdaptorCalcCode = R"(
+static const char *const variadicOfVariadicAdaptorCalcCode = R"(
   auto tblgenTmpOperands = getODSOperands({1});
   auto sizeAttrValues = {0}().getValues<uint32_t>();
   auto sizeAttrIt = sizeAttrValues.begin();
@@ -126,19 +121,11 @@ const char *variadicOfVariadicAdaptorCalcCode = R"(
 //
 // {0}: The begin iterator of the actual values.
 // {1}: The call to generate the start and length of the value range.
-const char *valueRangeReturnCode = R"(
+static const char *const valueRangeReturnCode = R"(
   auto valueRange = {1};
   return {{std::next({0}, valueRange.first),
            std::next({0}, valueRange.first + valueRange.second)};
 )";
-
-const char *typeVerifierSignature =
-    "static ::mlir::LogicalResult {0}(::mlir::Operation *op, ::mlir::Type "
-    "type, ::llvm::StringRef valueKind, unsigned valueGroupStartIndex)";
-
-const char *typeVerifierErrorHandler =
-    " op->emitOpError(valueKind) << \" #\" << valueGroupStartIndex << \" must "
-    "be {0}, but got \" << type";
 
 static const char *const opCommentHeader = R"(
 //===----------------------------------------------------------------------===//
@@ -166,7 +153,7 @@ static std::string replaceAllSubstrs(std::string str, const std::string &match,
 // via getValueAsString.
 static inline bool hasStringAttribute(const Record &record,
                                       StringRef fieldName) {
-  auto valueInit = record.getValueInit(fieldName);
+  auto *valueInit = record.getValueInit(fieldName);
   return isa<StringInit>(valueInit);
 }
 
@@ -184,6 +171,90 @@ static bool canUseUnwrappedRawValue(const tblgen::Attribute &attr) {
          // so we need to make sure that the attribute specifies how to do that.
          !attr.getConstBuilderTemplate().empty();
 }
+
+namespace {
+/// Helper class to select between OpAdaptor and Op code templates.
+class OpOrAdaptorHelper {
+public:
+  OpOrAdaptorHelper(const Operator &op, bool emitForOp)
+      : op(op), emitForOp(emitForOp) {}
+
+  /// Object that wraps a functor in a stream operator for interop with
+  /// llvm::formatv.
+  class Formatter {
+  public:
+    template <typename Functor>
+    Formatter(Functor &&func) : func(std::forward<Functor>(func)) {}
+
+    std::string str() const {
+      std::string result;
+      llvm::raw_string_ostream os(result);
+      os << *this;
+      return os.str();
+    }
+
+  private:
+    std::function<raw_ostream &(raw_ostream &)> func;
+
+    friend raw_ostream &operator<<(raw_ostream &os, const Formatter &fmt) {
+      return fmt.func(os);
+    }
+  };
+
+  // Generate code for getting an attribute.
+  Formatter getAttr(StringRef attrName) const {
+    return [this, attrName](raw_ostream &os) -> raw_ostream & {
+      if (!emitForOp)
+        return os << formatv("odsAttrs.get(\"{0}\")", attrName);
+      return os << formatv(opGetAttr, op.getGetterName(attrName));
+    };
+  }
+
+  // Get the prefix code for emitting an error.
+  Formatter emitErrorPrefix() const {
+    return [this](raw_ostream &os) -> raw_ostream & {
+      if (emitForOp)
+        return os << "emitOpError(";
+      return os << formatv("emitError(loc, \"'{0}' op \"",
+                           op.getOperationName());
+    };
+  }
+
+  // Get the call to get an operand or segment of operands.
+  Formatter getOperand(unsigned index) const {
+    return [this, index](raw_ostream &os) -> raw_ostream & {
+      return os << formatv(op.getOperand(index).isVariadic()
+                               ? "this->getODSOperands({0})"
+                               : "(*this->getODSOperands({0}).begin())",
+                           index);
+    };
+  }
+
+  // Get the call to get a result of segment of results.
+  Formatter getResult(unsigned index) const {
+    return [this, index](raw_ostream &os) -> raw_ostream & {
+      if (!emitForOp)
+        return os << "<no results should be generated>";
+      return os << formatv(op.getResult(index).isVariadic()
+                               ? "this->getODSResults({0})"
+                               : "(*this->getODSResults({0}).begin())",
+                           index);
+    };
+  }
+
+  // Return whether an op instance is available.
+  bool isEmittingForOp() const { return emitForOp; }
+
+  // Return the ODS operation wrapper.
+  const Operator &getOp() const { return op; }
+
+private:
+  // The operation ODS wrapper.
+  const Operator &op;
+  // True if code is being generate for an op. False for an adaptor.
+  const bool emitForOp;
+};
+} // end anonymous namespace
 
 //===----------------------------------------------------------------------===//
 // Op emitter
@@ -374,81 +445,68 @@ private:
 
 // Populate the format context `ctx` with substitutions of attributes, operands
 // and results.
-// - attrGet corresponds to the name of the function to call to get value of
-//   attribute (the generated function call returns an Attribute);
-// - operandGet corresponds to the name of the function with which to retrieve
-//   an operand (the generated function call returns an OperandRange);
-// - resultGet corresponds to the name of the function to get an result (the
-//   generated function call returns a ValueRange);
-// - opRequired whether an op instance is needed
-static void populateSubstitutions(const Operator &op, const char *attrGet,
-                                  const char *operandGet, const char *resultGet,
-                                  FmtContext &ctx, bool opRequired) {
-  // Populate substitutions for attributes and named operands.
-  for (const auto &namedAttr : op.getAttributes()) {
-    ctx.addSubst(namedAttr.name,
-                 formatv(attrGet, opRequired ? op.getGetterName(namedAttr.name)
-                                             : namedAttr.name));
-  }
+static void populateSubstitutions(const OpOrAdaptorHelper &emitHelper,
+                                  FmtContext &ctx) {
+  // Populate substitutions for attributes.
+  auto &op = emitHelper.getOp();
+  for (const auto &namedAttr : op.getAttributes())
+    ctx.addSubst(namedAttr.name, emitHelper.getAttr(namedAttr.name).str());
+
+  // Populate substitutions for named operands.
   for (int i = 0, e = op.getNumOperands(); i < e; ++i) {
     auto &value = op.getOperand(i);
-    if (value.name.empty())
-      continue;
-
-    if (value.isVariadic())
-      ctx.addSubst(value.name, formatv("{0}({1})", operandGet, i));
-    else
-      ctx.addSubst(value.name, formatv("(*{0}({1}).begin())", operandGet, i));
+    if (!value.name.empty())
+      ctx.addSubst(value.name, emitHelper.getOperand(i).str());
   }
 
   // Populate substitutions for results.
   for (int i = 0, e = op.getNumResults(); i < e; ++i) {
     auto &value = op.getResult(i);
-    if (value.name.empty())
-      continue;
-
-    if (value.isVariadic())
-      ctx.addSubst(value.name, formatv("{0}({1})", resultGet, i));
-    else
-      ctx.addSubst(value.name, formatv("(*{0}({1}).begin())", resultGet, i));
+    if (!value.name.empty())
+      ctx.addSubst(value.name, emitHelper.getResult(i).str());
   }
 }
 
-// Generate attribute verification. If emitVerificationRequiringOp is set then
-// only verification for attributes whose value depend on op being known are
-// emitted, else only verification that doesn't depend on the op being known are
-// generated.
-// - emitErrorPrefix is the prefix for the error emitting call which consists
-//   of the entire function call up to start of error message fragment;
-// - emitVerificationRequiringOp specifies whether verification should be
-//   emitted for verification that require the op to exist;
-static void genAttributeVerifier(const Operator &op, const char *attrGet,
-                                 const Twine &emitErrorPrefix,
-                                 bool emitVerificationRequiringOp,
-                                 FmtContext &ctx, OpMethodBody &body) {
+// Generate attribute verification. If an op instance is not available, then
+// attribute checks that require one will not be emitted.
+static void genAttributeVerifier(
+    const OpOrAdaptorHelper &emitHelper, FmtContext &ctx, OpMethodBody &body,
+    const StaticVerifierFunctionEmitter &staticVerifierEmitter) {
   // Check that a required attribute exists.
   //
   // {0}: Attribute variable name.
   // {1}: Emit error prefix.
   // {2}: Attribute name.
-  const char *const checkRequiredAttr = R"(
+  const char *const verifyRequiredAttr = R"(
     if (!{0})
       return {1}"requires attribute '{2}'");
-  )";
-  // Check the condition on an attribute if it is required. This assumes that
-  // default values are valid.
+)";
+  // Verify the attribute if it is present. This assumes that default values
+  // are valid. This code snippet pastes the condition inline.
+  //
   // TODO: verify the default value is valid (perhaps in debug mode only).
   //
   // {0}: Attribute variable name.
   // {1}: Attribute condition code.
   // {2}: Emit error prefix.
-  // {3}: Attribute/constraint description.
-  const char *const checkAttrCondition = R"(
+  // {3}: Attribute name.
+  // {4}: Attribute/constraint description.
+  const char *const verifyAttrInline = R"(
     if ({0} && !({1}))
       return {2}"attribute '{3}' failed to satisfy constraint: {4}");
-  )";
+)";
+  // Verify the attribute using a uniqued constraint. Can only be used within
+  // the context of an op.
+  //
+  // {0}: Unique constraint name.
+  // {1}: Attribute variable name.
+  // {2}: Attribute name.
+  const char *const verifyAttrUnique = R"(
+    if (::mlir::failed({0}(*this, {1}, "{2}")))
+      return ::mlir::failure();
+)";
 
-  for (const auto &namedAttr : op.getAttributes()) {
+  for (const auto &namedAttr : emitHelper.getOp().getAttributes()) {
     const auto &attr = namedAttr.attr;
     StringRef attrName = namedAttr.name;
     if (attr.isDerivedAttr())
@@ -460,7 +518,8 @@ static void genAttributeVerifier(const Operator &op, const char *attrGet,
     // If the attribute's condition needs an op but none is available, then the
     // condition cannot be emitted.
     bool canEmitCondition =
-        !StringRef(condition).contains("$_op") || emitVerificationRequiringOp;
+        !condition.empty() && (!StringRef(condition).contains("$_op") ||
+                               emitHelper.isEmittingForOp());
 
     // Prefix with `tblgen_` to avoid hiding the attribute accessor.
     Twine varName = tblgenNamePrefix + attrName;
@@ -471,18 +530,25 @@ static void genAttributeVerifier(const Operator &op, const char *attrGet,
       continue;
 
     body << formatv("  {\n    auto {0} = {1};", varName,
-                    formatv(attrGet, emitVerificationRequiringOp
-                                         ? op.getGetterName(attrName)
-                                         : attrName));
+                    emitHelper.getAttr(attrName));
 
-    if (!allowMissingAttr)
-      body << formatv(checkRequiredAttr, varName, emitErrorPrefix, attrName);
-    if (canEmitCondition) {
-      body << formatv(checkAttrCondition, varName,
-                      tgfmt(condition, &ctx.withSelf(varName)), emitErrorPrefix,
-                      attrName, escapeString(attr.getSummary()));
+    if (!allowMissingAttr) {
+      body << formatv(verifyRequiredAttr, varName, emitHelper.emitErrorPrefix(),
+                      attrName);
     }
-    body << "}\n";
+    if (canEmitCondition) {
+      Optional<StringRef> constraintFn;
+      if (emitHelper.isEmittingForOp() &&
+          (constraintFn = staticVerifierEmitter.getAttrConstraintFn(attr))) {
+        body << formatv(verifyAttrUnique, *constraintFn, varName, attrName);
+      } else {
+        body << formatv(verifyAttrInline, varName,
+                        tgfmt(condition, &ctx.withSelf(varName)),
+                        emitHelper.emitErrorPrefix(), attrName,
+                        escapeString(attr.getSummary()));
+      }
+    }
+    body << "  }\n";
   }
 }
 
@@ -685,13 +751,11 @@ void OpEmitter::genAttrGetters() {
         opClass.addMethodAndPrune(attr.getStorageType(), (name + "Attr").str());
     if (!method)
       return;
-    auto &body = method->body();
-    body << "  return (*this)->getAttr(" << name << "AttrName()).template ";
-    if (attr.isOptional() || attr.hasDefaultValue())
-      body << "dyn_cast_or_null<";
-    else
-      body << "cast<";
-    body << attr.getStorageType() << ">();";
+    method->body() << formatv(
+        "  return {0}.{1}<{2}>();", formatv(opGetAttr, name),
+        attr.isOptional() || attr.hasDefaultValue() ? "dyn_cast_or_null"
+                                                    : "cast",
+        attr.getStorageType());
   };
 
   for (const NamedAttribute &namedAttr : op.getAttributes()) {
@@ -783,8 +847,8 @@ void OpEmitter::genAttrSetters() {
     auto *method = opClass.addMethodAndPrune(
         "void", (setterName + "Attr").str(), attr.getStorageType(), "attr");
     if (method)
-      method->body() << "  (*this)->setAttr(" << getterName
-                     << "AttrName(), attr);";
+      method->body() << formatv("  (*this)->setAttr({0}AttrName(), attr);",
+                                getterName);
   };
 
   for (const NamedAttribute &namedAttr : op.getAttributes()) {
@@ -806,8 +870,8 @@ void OpEmitter::genOptionalAttrRemovers() {
         "::mlir::Attribute", ("remove" + upperInitial + suffix + "Attr").str());
     if (!method)
       return;
-    method->body() << "  return (*this)->removeAttr(" << op.getGetterName(name)
-                   << "AttrName());";
+    method->body() << formatv("  return (*this)->removeAttr({0}AttrName());",
+                              op.getGetterName(name));
   };
 
   for (const NamedAttribute &namedAttr : op.getAttributes())
@@ -949,7 +1013,7 @@ void OpEmitter::genNamedOperandGetters() {
   // array.
   std::string attrSizeInitCode;
   if (op.getTrait("::mlir::OpTrait::AttrSizedOperandSegments")) {
-    std::string attr = op.getGetterName("operand_segment_sizes") + "AttrName()";
+    std::string attr = op.getGetterName("operand_segment_sizes");
     attrSizeInitCode = formatv(opSegmentSizeAttrInitCode, attr).str();
   }
 
@@ -1037,7 +1101,7 @@ void OpEmitter::genNamedResultGetters() {
   // Build the initializer string for the result segment size attribute.
   std::string attrSizeInitCode;
   if (attrSizedResults) {
-    std::string attr = op.getGetterName("result_segment_sizes") + "AttrName()";
+    std::string attr = op.getGetterName("result_segment_sizes");
     attrSizeInitCode = formatv(opSegmentSizeAttrInitCode, attr).str();
   }
 
@@ -2037,18 +2101,16 @@ void OpEmitter::genTypeInterfaceMethods() {
 
   auto emitType =
       [&](const tblgen::Operator::ArgOrType &type) -> OpMethodBody & {
-    if (type.isArg()) {
-      auto argIndex = type.getArg();
-      assert(!op.getArg(argIndex).is<NamedAttribute *>());
-      auto arg = op.getArgToOperandOrAttribute(argIndex);
-      if (arg.kind() == Operator::OperandOrAttribute::Kind::Operand)
-        return body << "operands[" << arg.operandOrAttributeIndex()
-                    << "].getType()";
-      return body << "attributes[" << arg.operandOrAttributeIndex()
-                  << "].getType()";
-    } else {
+    if (!type.isArg())
       return body << tgfmt(*type.getType().getBuilderCall(), &fctx);
-    }
+    auto argIndex = type.getArg();
+    assert(!op.getArg(argIndex).is<NamedAttribute *>());
+    auto arg = op.getArgToOperandOrAttribute(argIndex);
+    if (arg.kind() == Operator::OperandOrAttribute::Kind::Operand)
+      return body << "operands[" << arg.operandOrAttributeIndex()
+                  << "].getType()";
+    return body << "attributes[" << arg.operandOrAttributeIndex()
+                << "].getType()";
   };
 
   for (int i = 0, e = op.getNumResults(); i != e; ++i) {
@@ -2085,7 +2147,7 @@ void OpEmitter::genPrinter() {
   if (hasStringAttribute(def, "assemblyFormat"))
     return;
 
-  auto valueInit = def.getValueInit("printer");
+  auto *valueInit = def.getValueInit("printer");
   StringInit *stringInit = dyn_cast<StringInit>(valueInit);
   if (!stringInit)
     return;
@@ -2100,10 +2162,8 @@ void OpEmitter::genPrinter() {
 }
 
 /// Generate verification on native traits requiring attributes.
-static void genNativeTraitAttrVerifier(OpMethodBody &body, const Operator &op,
-                                       const char *const attrGet,
-                                       const Twine &emitError,
-                                       bool opRequired) {
+static void genNativeTraitAttrVerifier(OpMethodBody &body,
+                                       const OpOrAdaptorHelper &emitHelper) {
   // Check that the variadic segment sizes attribute exists and contains the
   // expected number of elements.
   //
@@ -2127,6 +2187,7 @@ static void genNativeTraitAttrVerifier(OpMethodBody &body, const Operator &op,
 
   // Verify a few traits first so that we can use getODSOperands() and
   // getODSResults() in the rest of the verifier.
+  auto &op = emitHelper.getOp();
   for (auto &trait : op.getTraits()) {
     auto *t = dyn_cast<tblgen::NativeTrait>(&trait);
     if (!t)
@@ -2134,18 +2195,15 @@ static void genNativeTraitAttrVerifier(OpMethodBody &body, const Operator &op,
     std::string traitName = t->getFullyQualifiedTraitName();
     if (traitName == "::mlir::OpTrait::AttrSizedOperandSegments") {
       StringRef attrName = "operand_segment_sizes";
-      body << formatv(
-          checkAttrSizedValueSegmentsCode, attrName, op.getNumOperands(),
-          "operand",
-          formatv(attrGet, opRequired ? op.getGetterName(attrName) : attrName),
-          emitError);
+      body << formatv(checkAttrSizedValueSegmentsCode, attrName,
+                      op.getNumOperands(), "operand",
+                      emitHelper.getAttr(attrName),
+                      emitHelper.emitErrorPrefix());
     } else if (traitName == "::mlir::OpTrait::AttrSizedResultSegments") {
       StringRef attrName = "result_segment_sizes";
       body << formatv(
           checkAttrSizedValueSegmentsCode, attrName, op.getNumResults(),
-          "result",
-          formatv(attrGet, opRequired ? op.getGetterName(attrName) : attrName),
-          emitError);
+          "result", emitHelper.getAttr(attrName), emitHelper.emitErrorPrefix());
     }
   }
 }
@@ -2155,16 +2213,15 @@ void OpEmitter::genVerifier() {
   ERROR_IF_PRUNED(method, "verify", op);
   auto &body = method->body();
 
-  genNativeTraitAttrVerifier(body, op, opGetAttr, "emitOpError(", true);
+  OpOrAdaptorHelper emitHelper(op, /*isOp=*/true);
+  genNativeTraitAttrVerifier(body, emitHelper);
 
   auto *valueInit = def.getValueInit("verifier");
   StringInit *stringInit = dyn_cast<StringInit>(valueInit);
   bool hasCustomVerify = stringInit && !stringInit->getValue().empty();
-  populateSubstitutions(op, opGetAttr, "this->getODSOperands",
-                        "this->getODSResults", verifyCtx, /*opRequired=*/true);
+  populateSubstitutions(emitHelper, verifyCtx);
 
-  genAttributeVerifier(op, opGetAttr, "emitOpError(",
-                       /*emitVerificationRequiringOp=*/true, verifyCtx, body);
+  genAttributeVerifier(emitHelper, verifyCtx, body, staticVerifierEmitter);
   genOperandResultVerifier(body, op.getOperands(), "operand");
   genOperandResultVerifier(body, op.getResults(), "result");
 
@@ -2193,10 +2250,38 @@ void OpEmitter::genVerifier() {
 void OpEmitter::genOperandResultVerifier(OpMethodBody &body,
                                          Operator::value_range values,
                                          StringRef valueKind) {
+  // Check that an optional value is at most 1 element.
+  //
+  // {0}: Value index.
+  // {1}: "operand" or "result"
+  const char *const verifyOptional = R"(
+    if (valueGroup{0}.size() > 1) {
+      return emitOpError("{1} group starting at #") << index
+          << " requires 0 or 1 element, but found " << valueGroup{0}.size();
+    }
+)";
+  // Check the types of a range of values.
+  //
+  // {0}: Value index.
+  // {1}: Type constraint function.
+  // {2}: "operand" or "result"
+  const char *const verifyValues = R"(
+    for (auto v : valueGroup{0}) {
+      if (::mlir::failed({1}(*this, v.getType(), "{2}", index++)))
+        return ::mlir::failure();
+    }
+)";
+
+  const auto canSkip = [](const NamedTypeConstraint &value) {
+    return !value.hasPredicate() && !value.isOptional() &&
+           !value.isVariadicOfVariadic();
+  };
+  if (values.empty() || llvm::all_of(values, canSkip))
+    return;
+
   FmtContext fctx;
 
-  body << "  {\n";
-  body << "    unsigned index = 0; (void)index;\n";
+  body << "  {\n    unsigned index = 0; (void)index;\n";
 
   for (auto staticValue : llvm::enumerate(values)) {
     const NamedTypeConstraint &value = staticValue.value();
@@ -2214,11 +2299,7 @@ void OpEmitter::genOperandResultVerifier(OpMethodBody &body,
     // If the constraint is optional check that the value group has at most 1
     // value.
     if (isOptional) {
-      body << formatv("    if (valueGroup{0}.size() > 1)\n"
-                      "      return emitOpError(\"{1} group starting at #\") "
-                      "<< index << \" requires 0 or 1 element, but found \" << "
-                      "valueGroup{0}.size();\n",
-                      staticValue.index(), valueKind);
+      body << formatv(verifyOptional, staticValue.index(), valueKind);
     } else if (isVariadicOfVariadic) {
       body << formatv(
           "    if (::mlir::failed(::mlir::OpTrait::impl::verifyValueSizeAttr("
@@ -2233,93 +2314,89 @@ void OpEmitter::genOperandResultVerifier(OpMethodBody &body,
       continue;
     // Emit a loop to check all the dynamic values in the pack.
     StringRef constraintFn =
-        staticVerifierEmitter.getConstraintFn(value.constraint);
-    body << "    for (::mlir::Value v : valueGroup" << staticValue.index()
-         << ") {\n"
-         << "      if (::mlir::failed(" << constraintFn
-         << "(getOperation(), v.getType(), \"" << valueKind << "\", index)))\n"
-         << "        return ::mlir::failure();\n"
-         << "      ++index;\n"
-         << "    }\n";
+        staticVerifierEmitter.getTypeConstraintFn(value.constraint);
+    body << formatv(verifyValues, staticValue.index(), constraintFn, valueKind);
   }
 
   body << "  }\n";
 }
 
 void OpEmitter::genRegionVerifier(OpMethodBody &body) {
+  /// Code to verify a region.
+  ///
+  /// {0}: Getter for the regions.
+  /// {1}: The region constraint.
+  /// {2}: The region's name.
+  /// {3}: The region description.
+  const char *const verifyRegion = R"(
+    for (auto &region : {0})
+      if (::mlir::failed({1}(*this, region, "{2}", index++)))
+        return ::mlir::failure();
+)";
+  /// Get a single region.
+  ///
+  /// {0}: The region's index.
+  const char *const getSingleRegion =
+      "::llvm::makeMutableArrayRef((*this)->getRegion({0}))";
+
   // If we have no regions, there is nothing more to do.
-  unsigned numRegions = op.getNumRegions();
-  if (numRegions == 0)
+  const auto canSkip = [](const NamedRegion &region) {
+    return region.constraint.getPredicate().isNull();
+  };
+  auto regions = op.getRegions();
+  if (regions.empty() && llvm::all_of(regions, canSkip))
     return;
 
-  body << "{\n";
-  body << "    unsigned index = 0; (void)index;\n";
-
-  for (unsigned i = 0; i < numRegions; ++i) {
-    const auto &region = op.getRegion(i);
-    if (region.constraint.getPredicate().isNull())
+  body << "  {\n    unsigned index = 0; (void)index;\n";
+  for (auto it : llvm::enumerate(regions)) {
+    const auto &region = it.value();
+    if (canSkip(region))
       continue;
 
-    body << "    for (::mlir::Region &region : ";
-    body << formatv(region.isVariadic()
-                        ? "{0}()"
-                        : "::mlir::MutableArrayRef<::mlir::Region>((*this)"
-                          "->getRegion({1}))",
-                    op.getGetterName(region.name), i);
-    body << ") {\n";
-    auto constraint = tgfmt(region.constraint.getConditionTemplate(),
-                            &verifyCtx.withSelf("region"))
-                          .str();
-
-    body << formatv("      (void)region;\n"
-                    "      if (!({0})) {\n        "
-                    "return emitOpError(\"region #\") << index << \" {1}"
-                    "failed to "
-                    "verify constraint: {2}\";\n      }\n",
-                    constraint,
-                    region.name.empty() ? "" : "('" + region.name + "') ",
-                    region.constraint.getSummary())
-         << "      ++index;\n"
-         << "    }\n";
+    auto getRegion = region.isVariadic()
+                         ? formatv("{0}()", op.getGetterName(region.name)).str()
+                         : formatv(getSingleRegion, it.index()).str();
+    auto constraintFn =
+        staticVerifierEmitter.getRegionConstraintFn(region.constraint);
+    body << formatv(verifyRegion, getRegion, constraintFn, region.name);
   }
   body << "  }\n";
 }
 
 void OpEmitter::genSuccessorVerifier(OpMethodBody &body) {
+  const char *const verifySuccessor = R"(
+    for (auto *successor : {0})
+      if (::mlir::failed({1}(*this, successor, "{2}", index++)))
+        return ::mlir::failure();
+)";
+  /// Get a single successor.
+  ///
+  /// {0}: The successor's name.
+  const char *const getSingleSuccessor = "::llvm::makeMutableArrayRef({0}())";
+
   // If we have no successors, there is nothing more to do.
-  unsigned numSuccessors = op.getNumSuccessors();
-  if (numSuccessors == 0)
+  const auto canSkip = [](const NamedSuccessor &successor) {
+    return successor.constraint.getPredicate().isNull();
+  };
+  auto successors = op.getSuccessors();
+  if (successors.empty() && llvm::all_of(successors, canSkip))
     return;
 
-  body << "{\n";
-  body << "    unsigned index = 0; (void)index;\n";
+  body << "  {\n    unsigned index = 0; (void)index;\n";
 
-  for (unsigned i = 0; i < numSuccessors; ++i) {
-    const auto &successor = op.getSuccessor(i);
-    if (successor.constraint.getPredicate().isNull())
+  for (auto it : llvm::enumerate(successors)) {
+    const auto &successor = it.value();
+    if (canSkip(successor))
       continue;
 
-    if (successor.isVariadic()) {
-      body << formatv("    for (::mlir::Block *successor : {0}()) {\n",
-                      successor.name);
-    } else {
-      body << "    {\n";
-      body << formatv("      ::mlir::Block *successor = {0}();\n",
-                      successor.name);
-    }
-    auto constraint = tgfmt(successor.constraint.getConditionTemplate(),
-                            &verifyCtx.withSelf("successor"))
-                          .str();
-
-    body << formatv("      (void)successor;\n"
-                    "      if (!({0})) {\n        "
-                    "return emitOpError(\"successor #\") << index << \"('{1}') "
-                    "failed to "
-                    "verify constraint: {2}\";\n      }\n",
-                    constraint, successor.name,
-                    successor.constraint.getSummary())
-         << "      ++index;\n"
-         << "    }\n";
+    auto getSuccessor =
+        formatv(successor.isVariadic() ? "{0}()" : getSingleSuccessor,
+                successor.name, it.index())
+            .str();
+    auto constraintFn =
+        staticVerifierEmitter.getSuccessorConstraintFn(successor.constraint);
+    body << formatv(verifySuccessor, getSuccessor, constraintFn,
+                    successor.name);
   }
   body << "  }\n";
 }
@@ -2400,9 +2477,9 @@ void OpEmitter::genTraits() {
 
   // Add the native and interface traits.
   for (const auto &trait : op.getTraits()) {
-    if (auto opTrait = dyn_cast<tblgen::NativeTrait>(&trait))
+    if (auto *opTrait = dyn_cast<tblgen::NativeTrait>(&trait))
       opClass.addTrait(opTrait->getFullyQualifiedTraitName());
-    else if (auto opTrait = dyn_cast<tblgen::InterfaceTrait>(&trait))
+    else if (auto *opTrait = dyn_cast<tblgen::InterfaceTrait>(&trait))
       opClass.addTrait(opTrait->getFullyQualifiedTraitName());
   }
 }
@@ -2459,11 +2536,16 @@ namespace {
 // getters identical to those defined in the Op.
 class OpOperandAdaptorEmitter {
 public:
-  static void emitDecl(const Operator &op, raw_ostream &os);
-  static void emitDef(const Operator &op, raw_ostream &os);
+  static void emitDecl(const Operator &op,
+                       StaticVerifierFunctionEmitter &staticVerifierEmitter,
+                       raw_ostream &os);
+  static void emitDef(const Operator &op,
+                      StaticVerifierFunctionEmitter &staticVerifierEmitter,
+                      raw_ostream &os);
 
 private:
-  explicit OpOperandAdaptorEmitter(const Operator &op);
+  explicit OpOperandAdaptorEmitter(
+      const Operator &op, StaticVerifierFunctionEmitter &staticVerifierEmitter);
 
   // Add verification function. This generates a verify method for the adaptor
   // which verifies all the op-independent attribute constraints.
@@ -2471,11 +2553,14 @@ private:
 
   const Operator &op;
   Class adaptor;
+  StaticVerifierFunctionEmitter &staticVerifierEmitter;
 };
-} // end namespace
+} // end anonymous namespace
 
-OpOperandAdaptorEmitter::OpOperandAdaptorEmitter(const Operator &op)
-    : op(op), adaptor(op.getAdaptorName()) {
+OpOperandAdaptorEmitter::OpOperandAdaptorEmitter(
+    const Operator &op, StaticVerifierFunctionEmitter &staticVerifierEmitter)
+    : op(op), adaptor(op.getAdaptorName()),
+      staticVerifierEmitter(staticVerifierEmitter) {
   adaptor.newField("::mlir::ValueRange", "odsOperands");
   adaptor.newField("::mlir::DictionaryAttr", "odsAttrs");
   adaptor.newField("::mlir::RegionRange", "odsRegions");
@@ -2594,27 +2679,26 @@ void OpOperandAdaptorEmitter::addVerification() {
   ERROR_IF_PRUNED(method, "verify", op);
   auto &body = method->body();
 
-  std::string emitError =
-      "emitError(loc, \"'" + op.getOperationName() + "' op \"";
-  genNativeTraitAttrVerifier(body, op, adaptorGetAttr, emitError,
-                             /*opRequired=*/false);
-
+  OpOrAdaptorHelper emitHelper(op, /*isOp=*/false);
+  genNativeTraitAttrVerifier(body, emitHelper);
   FmtContext verifyCtx;
-  populateSubstitutions(op, adaptorGetAttr, "getODSOperands",
-                        "<no results should be generated>", verifyCtx,
-                        /*opRequired=*/false);
-  genAttributeVerifier(op, adaptorGetAttr, emitError,
-                       /*emitVerificationRequiringOp*/ false, verifyCtx, body);
+  populateSubstitutions(emitHelper, verifyCtx);
+
+  genAttributeVerifier(emitHelper, verifyCtx, body, staticVerifierEmitter);
 
   body << "  return ::mlir::success();";
 }
 
-void OpOperandAdaptorEmitter::emitDecl(const Operator &op, raw_ostream &os) {
-  OpOperandAdaptorEmitter(op).adaptor.writeDeclTo(os);
+void OpOperandAdaptorEmitter::emitDecl(
+    const Operator &op, StaticVerifierFunctionEmitter &staticVerifierEmitter,
+    raw_ostream &os) {
+  OpOperandAdaptorEmitter(op, staticVerifierEmitter).adaptor.writeDeclTo(os);
 }
 
-void OpOperandAdaptorEmitter::emitDef(const Operator &op, raw_ostream &os) {
-  OpOperandAdaptorEmitter(op).adaptor.writeDefTo(os);
+void OpOperandAdaptorEmitter::emitDef(
+    const Operator &op, StaticVerifierFunctionEmitter &staticVerifierEmitter,
+    raw_ostream &os) {
+  OpOperandAdaptorEmitter(op, staticVerifierEmitter).adaptor.writeDefTo(os);
 }
 
 // Emits the opcode enum and op classes.
@@ -2639,27 +2723,9 @@ static void emitOpClasses(const RecordKeeper &recordKeeper,
     return;
 
   // Generate all of the locally instantiated methods first.
-  StaticVerifierFunctionEmitter staticVerifierEmitter(recordKeeper);
+  StaticVerifierFunctionEmitter staticVerifierEmitter(os, recordKeeper);
   os << formatv(opCommentHeader, "Local Utility Method", "Definitions");
-  staticVerifierEmitter.setSelf("type");
-
-  // Collect a set of all of the used type constraints within the operation
-  // definitions.
-  llvm::SetVector<const void *> typeConstraints;
-  for (Record *def : defs) {
-    Operator op(*def);
-    for (NamedTypeConstraint &operand : op.getOperands())
-      if (operand.hasPredicate())
-        typeConstraints.insert(operand.constraint.getAsOpaquePointer());
-    for (NamedTypeConstraint &result : op.getResults())
-      if (result.hasPredicate())
-        typeConstraints.insert(result.constraint.getAsOpaquePointer());
-  }
-
-  staticVerifierEmitter.emitConstraintMethodsInNamespace(
-      typeVerifierSignature, typeVerifierErrorHandler,
-      Operator(*defs[0]).getCppNamespace(), typeConstraints.getArrayRef(), os,
-      emitDecl);
+  staticVerifierEmitter.emitOpConstraints(defs, emitDecl);
 
   for (auto *def : defs) {
     Operator op(*def);
@@ -2668,7 +2734,7 @@ static void emitOpClasses(const RecordKeeper &recordKeeper,
         NamespaceEmitter emitter(os, op.getCppNamespace());
         os << formatv(opCommentHeader, op.getQualCppClassName(),
                       "declarations");
-        OpOperandAdaptorEmitter::emitDecl(op, os);
+        OpOperandAdaptorEmitter::emitDecl(op, staticVerifierEmitter, os);
         OpEmitter::emitDecl(op, os, staticVerifierEmitter);
       }
       // Emit the TypeID explicit specialization to have a single definition.
@@ -2679,7 +2745,7 @@ static void emitOpClasses(const RecordKeeper &recordKeeper,
       {
         NamespaceEmitter emitter(os, op.getCppNamespace());
         os << formatv(opCommentHeader, op.getQualCppClassName(), "definitions");
-        OpOperandAdaptorEmitter::emitDef(op, os);
+        OpOperandAdaptorEmitter::emitDef(op, staticVerifierEmitter, os);
         OpEmitter::emitDef(op, os, staticVerifierEmitter);
       }
       // Emit the TypeID explicit specialization to have a single definition.

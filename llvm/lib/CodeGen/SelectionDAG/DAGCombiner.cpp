@@ -1063,21 +1063,22 @@ SDValue DAGCombiner::reassociateOpsCommutative(unsigned Opc, const SDLoc &DL,
   if (N0.getOpcode() != Opc)
     return SDValue();
 
-  if (DAG.isConstantIntBuildVectorOrConstantInt(N0.getOperand(1))) {
-    if (DAG.isConstantIntBuildVectorOrConstantInt(N1)) {
+  SDValue N00 = N0.getOperand(0);
+  SDValue N01 = N0.getOperand(1);
+
+  if (DAG.isConstantIntBuildVectorOrConstantInt(peekThroughBitcasts(N01))) {
+    if (DAG.isConstantIntBuildVectorOrConstantInt(peekThroughBitcasts(N1))) {
       // Reassociate: (op (op x, c1), c2) -> (op x, (op c1, c2))
-      if (SDValue OpNode =
-              DAG.FoldConstantArithmetic(Opc, DL, VT, {N0.getOperand(1), N1}))
-        return DAG.getNode(Opc, DL, VT, N0.getOperand(0), OpNode);
+      if (SDValue OpNode = DAG.FoldConstantArithmetic(Opc, DL, VT, {N01, N1}))
+        return DAG.getNode(Opc, DL, VT, N00, OpNode);
       return SDValue();
     }
     if (N0.hasOneUse()) {
       // Reassociate: (op (op x, c1), y) -> (op (op x, y), c1)
       //              iff (op x, c1) has one use
-      SDValue OpNode = DAG.getNode(Opc, SDLoc(N0), VT, N0.getOperand(0), N1);
-      if (!OpNode.getNode())
-        return SDValue();
-      return DAG.getNode(Opc, DL, VT, OpNode, N0.getOperand(1));
+      if (SDValue OpNode = DAG.getNode(Opc, SDLoc(N0), VT, N00, N1))
+        return DAG.getNode(Opc, DL, VT, OpNode, N01);
+      return SDValue();
     }
   }
   return SDValue();
@@ -4055,9 +4056,7 @@ SDValue DAGCombiner::useDivRem(SDNode *Node) {
   SDValue Op0 = Node->getOperand(0);
   SDValue Op1 = Node->getOperand(1);
   SDValue combined;
-  for (SDNode::use_iterator UI = Op0.getNode()->use_begin(),
-         UE = Op0.getNode()->use_end(); UI != UE; ++UI) {
-    SDNode *User = *UI;
+  for (SDNode *User : Op0.getNode()->uses()) {
     if (User == Node || User->getOpcode() == ISD::DELETED_NODE ||
         User->use_empty())
       continue;
@@ -9558,6 +9557,9 @@ static SDValue foldVSelectToSignBitSplatMask(SDNode *N, SelectionDAG &DAG) {
   if (VT != Cond0.getValueType())
     return SDValue();
 
+  // TODO: Check for the swapped variants of the following patterns. We can't
+  //       be sure what form is chosen as canonical in IR.
+
   // (Cond0 s< 0) ? N1 : 0 --> (Cond0 s>> BW-1) & N1
   if (CC == ISD::SETLT && isNullOrNullSplat(Cond1) && isNullOrNullSplat(N2)) {
     SDLoc DL(N);
@@ -9574,6 +9576,24 @@ static SDValue foldVSelectToSignBitSplatMask(SDNode *N, SelectionDAG &DAG) {
     SDValue Sra = DAG.getNode(ISD::SRA, DL, VT, Cond0, ShiftAmt);
     return DAG.getNode(ISD::OR, DL, VT, Sra, N2);
   }
+
+  // If the comparison is testing for a positive value, we have to invert
+  // the sign bit mask, so only do that transform if the target has a bitwise
+  // 'and not' instruction (the invert is free).
+  // (Cond0 s> -1) ? N1 : 0 --> ~(Cond0 s>> BW-1) & N1
+  const TargetLowering &TLI = DAG.getTargetLoweringInfo();
+  if (CC == ISD::SETGT && isAllOnesOrAllOnesSplat(Cond1) &&
+      isNullOrNullSplat(N2) && TLI.hasAndNot(N2)) {
+    SDLoc DL(N);
+    SDValue ShiftAmt = DAG.getConstant(VT.getScalarSizeInBits() - 1, DL, VT);
+    SDValue Sra = DAG.getNode(ISD::SRA, DL, VT, Cond0, ShiftAmt);
+    SDValue Not = DAG.getNOT(DL, Sra, VT);
+    return DAG.getNode(ISD::AND, DL, VT, Not, N1);
+  }
+
+  // TODO: There's another pattern in this family, but it may require
+  //       implementing hasOrNot() to check for profitability:
+  //       (Cond0 s> -1) ? -1 : N2 --> ~(Cond0 s>> BW-1) | N2
 
   return SDValue();
 }
