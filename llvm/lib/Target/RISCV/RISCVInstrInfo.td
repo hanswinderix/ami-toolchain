@@ -1484,3 +1484,9 @@ include "RISCVInstrInfoC.td"
 include "RISCVInstrInfoZb.td"
 include "RISCVInstrInfoV.td"
 include "RISCVInstrInfoZfh.td"
+
+//===----------------------------------------------------------------------===//
+// Non-standard extensions
+//===----------------------------------------------------------------------===//
+
+//include "RISCVInstrInfoXMimicry.td"
