@@ -465,6 +465,59 @@ struct BoxRankOpConversion : public FIROpConversion<fir::BoxRankOp> {
   }
 };
 
+/// Lower `fir.string_lit` to LLVM IR dialect operation.
+struct StringLitOpConversion : public FIROpConversion<fir::StringLitOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::StringLitOp constop, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    auto ty = convertType(constop.getType());
+    auto attr = constop.getValue();
+    if (attr.isa<mlir::StringAttr>()) {
+      rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(constop, ty, attr);
+      return success();
+    }
+
+    auto arr = attr.cast<mlir::ArrayAttr>();
+    auto charTy = constop.getType().cast<fir::CharacterType>();
+    unsigned bits = lowerTy().characterBitsize(charTy);
+    mlir::Type intTy = rewriter.getIntegerType(bits);
+    auto attrs = llvm::map_range(
+        arr.getValue(), [intTy, bits](mlir::Attribute attr) -> Attribute {
+          return mlir::IntegerAttr::get(
+              intTy,
+              attr.cast<mlir::IntegerAttr>().getValue().sextOrTrunc(bits));
+        });
+    mlir::Type vecType = mlir::VectorType::get(arr.size(), intTy);
+    auto denseAttr = mlir::DenseElementsAttr::get(
+        vecType.cast<mlir::ShapedType>(), llvm::to_vector<8>(attrs));
+    rewriter.replaceOpWithNewOp<mlir::arith::ConstantOp>(constop, ty,
+                                                         denseAttr);
+    return success();
+  }
+};
+
+/// Lower `fir.box_tdesc` to the sequence of operations to extract the type
+/// descriptor from the box.
+struct BoxTypeDescOpConversion : public FIROpConversion<fir::BoxTypeDescOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::BoxTypeDescOp boxtypedesc, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    mlir::Value box = adaptor.getOperands()[0];
+    auto loc = boxtypedesc.getLoc();
+    mlir::Type typeTy =
+        fir::getDescFieldTypeModel<kTypePosInBox>()(boxtypedesc.getContext());
+    auto result = getValueFromBox(loc, box, typeTy, rewriter, kTypePosInBox);
+    auto typePtrTy = mlir::LLVM::LLVMPointerType::get(typeTy);
+    rewriter.replaceOpWithNewOp<mlir::LLVM::IntToPtrOp>(boxtypedesc, typePtrTy,
+                                                        result);
+    return success();
+  }
+};
+
 // `fir.call` -> `llvm.call`
 struct CallOpConversion : public FIROpConversion<fir::CallOp> {
   using FIROpConversion::FIROpConversion;
@@ -486,6 +539,52 @@ static mlir::Type getComplexEleTy(mlir::Type complex) {
     return cc.getElementType();
   return complex.cast<fir::ComplexType>().getElementType();
 }
+
+/// Compare complex values
+///
+/// Per 10.1, the only comparisons available are .EQ. (oeq) and .NE. (une).
+///
+/// For completeness, all other comparison are done on the real component only.
+struct CmpcOpConversion : public FIROpConversion<fir::CmpcOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::CmpcOp cmp, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    mlir::ValueRange operands = adaptor.getOperands();
+    mlir::MLIRContext *ctxt = cmp.getContext();
+    mlir::Type eleTy = convertType(getComplexEleTy(cmp.lhs().getType()));
+    mlir::Type resTy = convertType(cmp.getType());
+    mlir::Location loc = cmp.getLoc();
+    auto pos0 = mlir::ArrayAttr::get(ctxt, rewriter.getI32IntegerAttr(0));
+    SmallVector<mlir::Value, 2> rp{rewriter.create<mlir::LLVM::ExtractValueOp>(
+                                       loc, eleTy, operands[0], pos0),
+                                   rewriter.create<mlir::LLVM::ExtractValueOp>(
+                                       loc, eleTy, operands[1], pos0)};
+    auto rcp =
+        rewriter.create<mlir::LLVM::FCmpOp>(loc, resTy, rp, cmp->getAttrs());
+    auto pos1 = mlir::ArrayAttr::get(ctxt, rewriter.getI32IntegerAttr(1));
+    SmallVector<mlir::Value, 2> ip{rewriter.create<mlir::LLVM::ExtractValueOp>(
+                                       loc, eleTy, operands[0], pos1),
+                                   rewriter.create<mlir::LLVM::ExtractValueOp>(
+                                       loc, eleTy, operands[1], pos1)};
+    auto icp =
+        rewriter.create<mlir::LLVM::FCmpOp>(loc, resTy, ip, cmp->getAttrs());
+    SmallVector<mlir::Value, 2> cp{rcp, icp};
+    switch (cmp.getPredicate()) {
+    case mlir::arith::CmpFPredicate::OEQ: // .EQ.
+      rewriter.replaceOpWithNewOp<mlir::LLVM::AndOp>(cmp, resTy, cp);
+      break;
+    case mlir::arith::CmpFPredicate::UNE: // .NE.
+      rewriter.replaceOpWithNewOp<mlir::LLVM::OrOp>(cmp, resTy, cp);
+      break;
+    default:
+      rewriter.replaceOp(cmp, rcp.getResult());
+      break;
+    }
+    return success();
+  }
+};
 
 /// convert value of from-type to value of to-type
 struct ConvertOpConversion : public FIROpConversion<fir::ConvertOp> {
@@ -633,6 +732,30 @@ struct DTEntryOpConversion : public FIROpConversion<fir::DTEntryOp> {
                   mlir::ConversionPatternRewriter &rewriter) const override {
     return rewriter.notifyMatchFailure(
         dtEnt, "fir.dt_entry codegen is not implemented yet");
+  }
+};
+
+/// Lower `fir.global_len` operation.
+struct GlobalLenOpConversion : public FIROpConversion<fir::GlobalLenOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::GlobalLenOp globalLen, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    return rewriter.notifyMatchFailure(
+        globalLen, "fir.global_len codegen is not implemented yet");
+  }
+};
+
+/// Lower `fir.gentypedesc` to a global constant.
+struct GenTypeDescOpConversion : public FIROpConversion<fir::GenTypeDescOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::GenTypeDescOp gentypedesc, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    return rewriter.notifyMatchFailure(
+        gentypedesc, "fir.fir.gentypedesc codegen is not implemented yet");
   }
 };
 
@@ -927,6 +1050,18 @@ struct LoadOpConversion : public FIROpConversion<fir::LoadOp> {
           load, ty, adaptor.getOperands(), at);
     }
     return success();
+  }
+};
+
+/// Lower `fir.select_type` to LLVM IR dialect.
+struct SelectTypeOpConversion : public FIROpConversion<fir::SelectTypeOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::SelectTypeOp select, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    return rewriter.notifyMatchFailure(
+        select, "fir.select_type codegen is not implemented yet");
   }
 };
 
@@ -1354,6 +1489,42 @@ struct NegcOpConversion : public FIROpConversion<fir::NegcOp> {
   }
 };
 
+/// Conversion pattern for operation that must be dead. The information in these
+/// operations is used by other operation. At this point they should not have
+/// anymore uses.
+/// These operations are normally dead after the pre-codegen pass.
+template <typename FromOp>
+struct MustBeDeadConversion : public FIROpConversion<FromOp> {
+  explicit MustBeDeadConversion(fir::LLVMTypeConverter &lowering)
+      : FIROpConversion<FromOp>(lowering) {}
+  using OpAdaptor = typename FromOp::Adaptor;
+
+  mlir::LogicalResult
+  matchAndRewrite(FromOp op, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const final {
+    if (!op->getUses().empty())
+      return rewriter.notifyMatchFailure(op, "op must be dead");
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct ShapeOpConversion : public MustBeDeadConversion<fir::ShapeOp> {
+  using MustBeDeadConversion::MustBeDeadConversion;
+};
+
+struct ShapeShiftOpConversion : public MustBeDeadConversion<fir::ShapeShiftOp> {
+  using MustBeDeadConversion::MustBeDeadConversion;
+};
+
+struct ShiftOpConversion : public MustBeDeadConversion<fir::ShiftOp> {
+  using MustBeDeadConversion::MustBeDeadConversion;
+};
+
+struct SliceOpConversion : public MustBeDeadConversion<fir::SliceOp> {
+  using MustBeDeadConversion::MustBeDeadConversion;
+};
+
 /// `fir.is_present` -->
 /// ```
 ///  %0 = llvm.mlir.constant(0 : i64)
@@ -1388,6 +1559,104 @@ struct IsPresentOpConversion : public FIROpConversion<fir::IsPresentOp> {
     return success();
   }
 };
+
+/// Convert `!fir.emboxchar<!fir.char<KIND, ?>, #n>` into a sequence of
+/// instructions that generate `!llvm.struct<(ptr<ik>, i64)>`. The 1st element
+/// in this struct is a pointer. Its type is determined from `KIND`. The 2nd
+/// element is the length of the character buffer (`#n`).
+struct EmboxCharOpConversion : public FIROpConversion<fir::EmboxCharOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::EmboxCharOp emboxChar, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    mlir::ValueRange operands = adaptor.getOperands();
+    MLIRContext *ctx = emboxChar.getContext();
+
+    mlir::Value charBuffer = operands[0];
+    mlir::Value charBufferLen = operands[1];
+
+    mlir::Location loc = emboxChar.getLoc();
+    mlir::Type llvmStructTy = convertType(emboxChar.getType());
+    auto llvmStruct = rewriter.create<mlir::LLVM::UndefOp>(loc, llvmStructTy);
+
+    mlir::Type lenTy =
+        llvmStructTy.cast<mlir::LLVM::LLVMStructType>().getBody()[1];
+    mlir::Value lenAfterCast = integerCast(loc, rewriter, lenTy, charBufferLen);
+
+    auto c0 = mlir::ArrayAttr::get(ctx, rewriter.getI32IntegerAttr(0));
+    auto c1 = mlir::ArrayAttr::get(ctx, rewriter.getI32IntegerAttr(1));
+    auto insertBufferOp = rewriter.create<mlir::LLVM::InsertValueOp>(
+        loc, llvmStructTy, llvmStruct, charBuffer, c0);
+    rewriter.replaceOpWithNewOp<mlir::LLVM::InsertValueOp>(
+        emboxChar, llvmStructTy, insertBufferOp, lenAfterCast, c1);
+
+    return success();
+  }
+};
+
+/// Construct an `llvm.extractvalue` instruction. It will return value at
+/// element \p x from  \p tuple.
+mlir::LLVM::ExtractValueOp
+genExtractValueWithIndex(mlir::Location loc, mlir::Value tuple, mlir::Type ty,
+                         mlir::ConversionPatternRewriter &rewriter,
+                         mlir::MLIRContext *ctx, int x) {
+  auto cx = mlir::ArrayAttr::get(ctx, rewriter.getI32IntegerAttr(x));
+  auto xty = ty.cast<mlir::LLVM::LLVMStructType>().getBody()[x];
+  return rewriter.create<mlir::LLVM::ExtractValueOp>(loc, xty, tuple, cx);
+}
+
+/// Convert `!fir.boxchar_len` to  `!llvm.extractvalue` for the 2nd part of the
+/// boxchar.
+struct BoxCharLenOpConversion : public FIROpConversion<fir::BoxCharLenOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::BoxCharLenOp boxCharLen, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    mlir::Value boxChar = adaptor.getOperands()[0];
+    mlir::Location loc = boxChar.getLoc();
+    mlir::MLIRContext *ctx = boxChar.getContext();
+    mlir::Type returnValTy = boxCharLen.getResult().getType();
+
+    constexpr int boxcharLenIdx = 1;
+    mlir::LLVM::ExtractValueOp len = genExtractValueWithIndex(
+        loc, boxChar, boxChar.getType(), rewriter, ctx, boxcharLenIdx);
+    mlir::Value lenAfterCast = integerCast(loc, rewriter, returnValTy, len);
+    rewriter.replaceOp(boxCharLen, lenAfterCast);
+
+    return success();
+  }
+};
+
+/// Convert `fir.unboxchar` into two `llvm.extractvalue` instructions. One for
+/// the character buffer and one for the buffer length.
+struct UnboxCharOpConversion : public FIROpConversion<fir::UnboxCharOp> {
+  using FIROpConversion::FIROpConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::UnboxCharOp unboxchar, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    MLIRContext *ctx = unboxchar.getContext();
+
+    mlir::Type lenTy = convertType(unboxchar.getType(1));
+    mlir::Value tuple = adaptor.getOperands()[0];
+    mlir::Type tupleTy = tuple.getType();
+
+    mlir::Location loc = unboxchar.getLoc();
+    mlir::Value ptrToBuffer =
+        genExtractValueWithIndex(loc, tuple, tupleTy, rewriter, ctx, 0);
+
+    mlir::LLVM::ExtractValueOp len =
+        genExtractValueWithIndex(loc, tuple, tupleTy, rewriter, ctx, 1);
+    mlir::Value lenAfterCast = integerCast(loc, rewriter, lenTy, len);
+
+    rewriter.replaceOp(unboxchar,
+                       ArrayRef<mlir::Value>{ptrToBuffer, lenAfterCast});
+    return success();
+  }
+};
+
 } // namespace
 
 namespace {
@@ -1412,17 +1681,21 @@ public:
     mlir::OwningRewritePatternList pattern(context);
     pattern.insert<
         AbsentOpConversion, AddcOpConversion, AddrOfOpConversion,
-        AllocaOpConversion, BoxAddrOpConversion, BoxDimsOpConversion,
-        BoxEleSizeOpConversion, BoxIsAllocOpConversion, BoxIsArrayOpConversion,
-        BoxIsPtrOpConversion, BoxRankOpConversion, CallOpConversion,
+        AllocaOpConversion, BoxAddrOpConversion, BoxCharLenOpConversion,
+        BoxDimsOpConversion, BoxEleSizeOpConversion, BoxIsAllocOpConversion,
+        BoxIsArrayOpConversion, BoxIsPtrOpConversion, BoxRankOpConversion,
+        BoxTypeDescOpConversion, CallOpConversion, CmpcOpConversion,
         ConvertOpConversion, DispatchOpConversion, DispatchTableOpConversion,
-        DTEntryOpConversion, DivcOpConversion, ExtractValueOpConversion,
-        HasValueOpConversion, GlobalOpConversion, InsertOnRangeOpConversion,
+        DTEntryOpConversion, DivcOpConversion, EmboxCharOpConversion,
+        ExtractValueOpConversion, HasValueOpConversion, GenTypeDescOpConversion,
+        GlobalLenOpConversion, GlobalOpConversion, InsertOnRangeOpConversion,
         InsertValueOpConversion, IsPresentOpConversion, LoadOpConversion,
         NegcOpConversion, MulcOpConversion, SelectCaseOpConversion,
-        SelectOpConversion, SelectRankOpConversion, StoreOpConversion,
-        SubcOpConversion, UndefOpConversion, UnreachableOpConversion,
-        ZeroOpConversion>(typeConverter);
+        SelectOpConversion, SelectRankOpConversion, SelectTypeOpConversion,
+        ShapeOpConversion, ShapeShiftOpConversion, ShiftOpConversion,
+        SliceOpConversion, StoreOpConversion, StringLitOpConversion,
+        SubcOpConversion, UnboxCharOpConversion, UndefOpConversion,
+        UnreachableOpConversion, ZeroOpConversion>(typeConverter);
     mlir::populateStdToLLVMConversionPatterns(typeConverter, pattern);
     mlir::arith::populateArithmeticToLLVMConversionPatterns(typeConverter,
                                                             pattern);

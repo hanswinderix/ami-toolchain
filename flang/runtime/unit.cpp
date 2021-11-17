@@ -261,9 +261,10 @@ bool ExternalFileUnit::Emit(const char *data, std::size_t bytes,
   if (recordLength) {
     // It is possible for recordLength to have a value now for a
     // variable-length output record if the previous operation
-    // was a BACKSPACE.
+    // was a BACKSPACE or non advancing input statement.
     if (!isFixedRecordLength) {
       recordLength.reset();
+      beganReadingRecord_ = false;
     } else if (furthestAfter > *recordLength) {
       handler.SignalError(IostatRecordWriteOverrun,
           "Attempt to write %zd bytes to position %jd in a fixed-size record "
@@ -317,14 +318,23 @@ bool ExternalFileUnit::Receive(char *data, std::size_t bytes,
   }
 }
 
+std::size_t ExternalFileUnit::GetNextInputBytes(
+    const char *&p, IoErrorHandler &handler) {
+  RUNTIME_CHECK(handler, direction_ == Direction::Input);
+  p = FrameNextInput(handler, 1);
+  return p ? recordLength.value_or(positionInRecord + 1) - positionInRecord : 0;
+}
+
 std::optional<char32_t> ExternalFileUnit::GetCurrentChar(
     IoErrorHandler &handler) {
-  RUNTIME_CHECK(handler, direction_ == Direction::Input);
-  if (const char *p{FrameNextInput(handler, 1)}) {
+  const char *p{nullptr};
+  std::size_t bytes{GetNextInputBytes(p, handler)};
+  if (bytes == 0) {
+    return std::nullopt;
+  } else {
     // TODO: UTF-8 decoding; may have to get more bytes in a loop
     return *p;
   }
-  return std::nullopt;
 }
 
 const char *ExternalFileUnit::FrameNextInput(

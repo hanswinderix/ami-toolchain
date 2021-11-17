@@ -65,6 +65,9 @@ public:
       return mlir::IntegerType::get(
           &getContext(), kindMapping.getLogicalBitsize(boolTy.getFKind()));
     });
+    addConversion([&](fir::LLVMPointerType pointer) {
+      return convertPointerLike(pointer);
+    });
     addConversion(
         [&](fir::PointerType pointer) { return convertPointerLike(pointer); });
     addConversion(
@@ -72,6 +75,11 @@ public:
     addConversion([&](fir::FieldType field) {
       // Convert to i32 because of LLVM GEP indexing restriction.
       return mlir::IntegerType::get(field.getContext(), 32);
+    });
+    addConversion([&](fir::LenType field) {
+      // Get size of len paramter from the descriptor.
+      return getModel<Fortran::runtime::typeInfo::TypeParameterValue>()(
+          &getContext());
     });
     addConversion(
         [&](fir::ComplexType cmplx) { return convertComplexType(cmplx); });
@@ -81,6 +89,9 @@ public:
         [&](fir::ReferenceType ref) { return convertPointerLike(ref); });
     addConversion([&](fir::SequenceType sequence) {
       return convertSequenceType(sequence);
+    });
+    addConversion([&](fir::TypeDescType tdesc) {
+      return convertTypeDescType(tdesc.getContext());
     });
     addConversion([&](fir::VectorType vecTy) {
       return mlir::VectorType::get(llvm::ArrayRef<int64_t>(vecTy.getLen()),
@@ -273,6 +284,14 @@ public:
         return baseTy;
     }
     return mlir::LLVM::LLVMPointerType::get(baseTy);
+  }
+
+  // fir.tdesc<any>  -->  llvm<"i8*">
+  // TODO: For now use a void*, however pointer identity is not sufficient for
+  // the f18 object v. class distinction (F2003).
+  mlir::Type convertTypeDescType(mlir::MLIRContext *ctx) {
+    return mlir::LLVM::LLVMPointerType::get(
+        mlir::IntegerType::get(&getContext(), 8));
   }
 
   /// Convert llvm::Type::TypeID to mlir::Type
