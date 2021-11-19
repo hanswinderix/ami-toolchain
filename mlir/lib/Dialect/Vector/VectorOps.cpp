@@ -486,7 +486,7 @@ static void print(OpAsmPrinter &p, ContractionOp op) {
   traitAttrsSet.insert(attrNames.begin(), attrNames.end());
   SmallVector<NamedAttribute, 8> attrs;
   for (auto attr : op->getAttrs())
-    if (traitAttrsSet.count(attr.first.strref()) > 0)
+    if (traitAttrsSet.count(attr.getName().strref()) > 0)
       attrs.push_back(attr);
 
   auto dictAttr = DictionaryAttr::get(op.getContext(), attrs);
@@ -836,13 +836,6 @@ void vector::ExtractElementOp::build(OpBuilder &builder, OperationState &result,
                                      Value source, Value position) {
   result.addOperands({source, position});
   result.addTypes(source.getType().cast<VectorType>().getElementType());
-}
-
-void vector::ExtractElementOp::build(OpBuilder &builder, OperationState &result,
-                                     Value source, int64_t position) {
-  Value pos =
-      builder.create<arith::ConstantIntOp>(result.location, position, 32);
-  build(builder, result, source, pos);
 }
 
 static LogicalResult verify(vector::ExtractElementOp op) {
@@ -1503,13 +1496,6 @@ void InsertElementOp::build(OpBuilder &builder, OperationState &result,
                             Value source, Value dest, Value position) {
   result.addOperands({source, dest, position});
   result.addTypes(dest.getType());
-}
-
-void InsertElementOp::build(OpBuilder &builder, OperationState &result,
-                            Value source, Value dest, int64_t position) {
-  Value pos =
-      builder.create<arith::ConstantIntOp>(result.location, position, 32);
-  build(builder, result, source, dest, pos);
 }
 
 static LogicalResult verify(InsertElementOp op) {
