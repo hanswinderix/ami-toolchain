@@ -408,6 +408,16 @@ class BranchCC_rri<bits<3> funct3, string opcodestr>
   let isTerminator = 1;
 }
 
+let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
+class MBranchCC_rri<bits<3> funct3, string opcodestr>
+    : RVInstB<funct3, OPC_MBRANCH, (outs),
+              (ins GPR:$rs1, GPR:$rs2, simm13_lsb0:$imm12),
+              opcodestr, "$rs1, $rs2, $imm12">,
+      Sched<[WriteJmp, ReadJmp, ReadJmp]> {
+  let isBranch = 1;
+  let isTerminator = 1;
+}
+
 let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
 class Load_ri<bits<3> funct3, string opcodestr>
     : RVInstI<funct3, OPC_LOAD, (outs GPR:$rd), (ins GPR:$rs1, simm12:$imm12),
@@ -512,6 +522,7 @@ def JALR : RVInstI<0b000, OPC_JALR, (outs GPR:$rd),
 } // hasSideEffects = 0, mayLoad = 0, mayStore = 0
 
 def BEQ  : BranchCC_rri<0b000, "beq">;
+def MBEQ : MBranchCC_rri<0b000, "m.beq">;
 def BNE  : BranchCC_rri<0b001, "bne">;
 def BLT  : BranchCC_rri<0b100, "blt">;
 def BGE  : BranchCC_rri<0b101, "bge">;
