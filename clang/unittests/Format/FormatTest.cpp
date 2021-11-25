@@ -2860,6 +2860,19 @@ TEST_F(FormatTest, MultiLineControlStatements) {
             "  baz();\n"
             "}",
             format("try{foo();}catch(...){baz();}", Style));
+
+  Style.BraceWrapping.AfterFunction = true;
+  Style.BraceWrapping.AfterControlStatement = FormatStyle::BWACS_MultiLine;
+  Style.AllowShortFunctionsOnASingleLine = FormatStyle::SFS_All;
+  Style.ColumnLimit = 80;
+  verifyFormat("void shortfunction() { bar(); }", Style);
+
+  Style.AllowShortFunctionsOnASingleLine = FormatStyle::SFS_None;
+  verifyFormat("void shortfunction()\n"
+               "{\n"
+               "  bar();\n"
+               "}",
+               Style);
 }
 
 TEST_F(FormatTest, BeforeWhile) {
@@ -9439,6 +9452,13 @@ TEST_F(FormatTest, UnderstandsUsesOfStarAndAmp) {
   verifyFormat("void f() { &(*I).first; }");
 
   verifyIndependentOfContext("f(b * /* confusing comment */ ++c);");
+  verifyFormat("f(* /* confusing comment */ foo);");
+  verifyFormat("void (* /*deleter*/)(const Slice &key, void *value)");
+  verifyFormat("void foo(int * // this is the first paramters\n"
+               "         ,\n"
+               "         int second);");
+  verifyFormat("double term = a * // first\n"
+               "              b;");
   verifyFormat(
       "int *MyValues = {\n"
       "    *A, // Operator detection might be confused by the '{'\n"
