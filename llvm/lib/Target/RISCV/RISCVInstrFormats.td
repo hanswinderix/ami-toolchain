@@ -135,7 +135,9 @@ def OPC_BRANCH    : RISCVOpcode<0b1100011>;
 def OPC_ABRANCH   : RISCVOpcode<0b1100001>;
 def OPC_IBRANCH   : RISCVOpcode<0b1100000>;
 def OPC_DBRANCH   : RISCVOpcode<0b1100010>;
+def OPC_MJALR     : RISCVOpcode<0b1100101>;
 def OPC_JALR      : RISCVOpcode<0b1100111>;
+def OPC_MJAL      : RISCVOpcode<0b1101101>;
 def OPC_JAL       : RISCVOpcode<0b1101111>;
 def OPC_SYSTEM    : RISCVOpcode<0b1110011>;
 
