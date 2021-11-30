@@ -471,8 +471,8 @@ class GALU_ri<bits<3> funct3, string opcodestr>
       Sched<[WriteIALU, ReadIALU]>;
 
 let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
-class EALU_ri<bits<3> funct3, string opcodestr>
-    : RVInstI<funct3, OPC_OP_EIMM, (outs GPR:$rd), (ins GPR:$rs1, simm12:$imm12),
+class PALU_ri<bits<3> funct3, string opcodestr>
+    : RVInstI<funct3, OPC_OP_PIMM, (outs GPR:$rd), (ins GPR:$rs1, simm12:$imm12),
               opcodestr, "$rd, $rs1, $imm12">,
       Sched<[WriteIALU, ReadIALU]>;
 
@@ -578,7 +578,7 @@ let isReMaterializable = 1, isAsCheapAsAMove = 1 in
 def ADDI  : ALU_ri<0b000, "addi">;
 def MADDI : MALU_ri<0b000, "m.addi">;
 def GADDI : GALU_ri<0b000, "g.addi">;
-def EADDI : EALU_ri<0b000, "e.addi">;
+def PADDI : PALU_ri<0b000, "p.addi">;
 
 def SLTI  : ALU_ri<0b010, "slti">;
 def SLTIU : ALU_ri<0b011, "sltiu">;
