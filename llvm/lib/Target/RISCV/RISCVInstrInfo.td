@@ -1537,4 +1537,7 @@ include "RISCVInstrInfoZfh.td"
 // Non-standard extensions
 //===----------------------------------------------------------------------===//
 
+def : InstAlias<"emm $offset",
+                (ABEQ X0, X0, simm13_lsb0:$offset)>;
+
 //include "RISCVInstrInfoXMimicry.td"
