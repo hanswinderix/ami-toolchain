@@ -133,9 +133,15 @@ New check aliases
 Changes in existing checks
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-- Removed default setting `cppcoreguidelines-explicit-virtual-functions.IgnoreDestructors = "true"`,
+- Removed default setting ``cppcoreguidelines-explicit-virtual-functions.IgnoreDestructors = "true"``,
   to match the current state of the C++ Core Guidelines.
 
+- Updated :doc:`google-readability-casting
+  <clang-tidy/checks/google-readability-casting>` to diagnose and fix functional
+  casts, to achieve feature parity with the corresponding ``cpplint.py`` check.
+
+- Fixed a false positive in :doc:`fuchsia-trailing-return
+  <clang-tidy/checks/fuchsia-trailing-return>` for C++17 deduction guides.
 
 Removed checks
 ^^^^^^^^^^^^^^

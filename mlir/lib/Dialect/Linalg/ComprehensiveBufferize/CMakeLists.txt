@@ -1,8 +1,10 @@
 set(LLVM_OPTIONAL_SOURCES
+  AffineInterfaceImpl.cpp
   ArithInterfaceImpl.cpp
   BufferizableOpInterface.cpp
   ComprehensiveBufferize.cpp
   LinalgInterfaceImpl.cpp
+  ModuleBufferization.cpp
   SCFInterfaceImpl.cpp
   TensorInterfaceImpl.cpp
   VectorInterfaceImpl.cpp
@@ -16,7 +18,16 @@ add_mlir_dialect_library(MLIRBufferizableOpInterface
 
   LINK_LIBS PUBLIC
   MLIRIR
+  MLIRBufferization
   MLIRMemRef
+)
+
+add_mlir_dialect_library(MLIRAffineBufferizableOpInterfaceImpl
+  AffineInterfaceImpl.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRAffine
+  MLIRBufferizableOpInterface
 )
 
 add_mlir_dialect_library(MLIRArithBufferizableOpInterfaceImpl
@@ -70,9 +81,9 @@ add_mlir_dialect_library(MLIRVectorBufferizableOpInterfaceImpl
 
 add_mlir_dialect_library(MLIRComprehensiveBufferize
   ComprehensiveBufferize.cpp
+  ModuleBufferization.cpp
 
   LINK_LIBS PUBLIC
-  MLIRAffine
   MLIRBufferizableOpInterface
   MLIRInferTypeOpInterface
   MLIRIR
