@@ -111,6 +111,7 @@ class RISCVOpcode<bits<7> val> {
   bits<7> Value = val;
 }
 def OPC_LOAD      : RISCVOpcode<0b0000011>;
+def OPC_PLOAD     : RISCVOpcode<0b0000010>;
 def OPC_LOAD_FP   : RISCVOpcode<0b0000111>;
 def OPC_MISC_MEM  : RISCVOpcode<0b0001111>;
 def OPC_OP_IMM    : RISCVOpcode<0b0010011>;
