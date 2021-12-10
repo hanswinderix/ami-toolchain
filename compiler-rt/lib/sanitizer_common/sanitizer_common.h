@@ -326,12 +326,6 @@ void SetUserDieCallback(DieCallbackType callback);
 
 void SetCheckUnwindCallback(void (*callback)());
 
-// Callback will be called if soft_rss_limit_mb is given and the limit is
-// exceeded (exceeded==true) or if rss went down below the limit
-// (exceeded==false).
-// The callback should be registered once at the tool init time.
-void SetSoftRssLimitExceededCallback(void (*Callback)(bool exceeded));
-
 // Functions related to signal handling.
 typedef void (*SignalHandlerType)(int, void *, void *);
 HandleSignalMode GetHandleSignalMode(int signum);
@@ -673,11 +667,9 @@ void Sort(T *v, uptr size, Compare comp = {}) {
 
 // Works like std::lower_bound: finds the first element that is not less
 // than the val.
-template <class Container,
+template <class Container, class T,
           class Compare = CompareLess<typename Container::value_type>>
-uptr InternalLowerBound(const Container &v,
-                        const typename Container::value_type &val,
-                        Compare comp = {}) {
+uptr InternalLowerBound(const Container &v, const T &val, Compare comp = {}) {
   uptr first = 0;
   uptr last = v.size();
   while (last > first) {

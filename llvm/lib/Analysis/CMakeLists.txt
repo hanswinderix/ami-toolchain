@@ -50,6 +50,7 @@ add_llvm_component_library(LLVMAnalysis
   CostModel.cpp
   CodeMetrics.cpp
   ConstantFolding.cpp
+  CycleAnalysis.cpp
   DDG.cpp
   DDGPrinter.cpp
   ConstraintSystem.cpp
@@ -105,6 +106,7 @@ add_llvm_component_library(LLVMAnalysis
   ModuleDebugInfoPrinter.cpp
   ModuleSummaryAnalysis.cpp
   MustExecute.cpp
+  NoInferenceModelRunner.cpp
   ObjCARCAliasAnalysis.cpp
   ObjCARCAnalysisUtils.cpp
   ObjCARCInstKind.cpp

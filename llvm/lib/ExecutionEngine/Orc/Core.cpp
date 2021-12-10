@@ -243,8 +243,7 @@ void AsynchronousSymbolQuery::detach() {
 
 AbsoluteSymbolsMaterializationUnit::AbsoluteSymbolsMaterializationUnit(
     SymbolMap Symbols)
-    : MaterializationUnit(extractFlags(Symbols), nullptr),
-      Symbols(std::move(Symbols)) {}
+    : MaterializationUnit(extractFlags(Symbols)), Symbols(std::move(Symbols)) {}
 
 StringRef AbsoluteSymbolsMaterializationUnit::getName() const {
   return "<Absolute Symbols>";
@@ -263,18 +262,18 @@ void AbsoluteSymbolsMaterializationUnit::discard(const JITDylib &JD,
   Symbols.erase(Name);
 }
 
-SymbolFlagsMap
+MaterializationUnit::Interface
 AbsoluteSymbolsMaterializationUnit::extractFlags(const SymbolMap &Symbols) {
   SymbolFlagsMap Flags;
   for (const auto &KV : Symbols)
     Flags[KV.first] = KV.second.getFlags();
-  return Flags;
+  return MaterializationUnit::Interface(std::move(Flags), nullptr);
 }
 
 ReExportsMaterializationUnit::ReExportsMaterializationUnit(
     JITDylib *SourceJD, JITDylibLookupFlags SourceJDLookupFlags,
     SymbolAliasMap Aliases)
-    : MaterializationUnit(extractFlags(Aliases), nullptr), SourceJD(SourceJD),
+    : MaterializationUnit(extractFlags(Aliases)), SourceJD(SourceJD),
       SourceJDLookupFlags(SourceJDLookupFlags), Aliases(std::move(Aliases)) {}
 
 StringRef ReExportsMaterializationUnit::getName() const {
@@ -456,13 +455,13 @@ void ReExportsMaterializationUnit::discard(const JITDylib &JD,
   Aliases.erase(Name);
 }
 
-SymbolFlagsMap
+MaterializationUnit::Interface
 ReExportsMaterializationUnit::extractFlags(const SymbolAliasMap &Aliases) {
   SymbolFlagsMap SymbolFlags;
   for (auto &KV : Aliases)
     SymbolFlags[KV.first] = KV.second.AliasFlags;
 
-  return SymbolFlags;
+  return MaterializationUnit::Interface(std::move(SymbolFlags), nullptr);
 }
 
 Expected<SymbolAliasMap> buildSimpleReexportsAliasMap(JITDylib &SourceJD,
@@ -2716,8 +2715,8 @@ void ExecutionSession::OL_completeLookup(
 
       LLVM_DEBUG(dbgs() << "Adding MUs to dispatch:\n");
       for (auto &KV : CollectedUMIs) {
-        auto &JD = *KV.first;
         LLVM_DEBUG({
+          auto &JD = *KV.first;
           dbgs() << "  For " << JD.getName() << ": Adding " << KV.second.size()
                  << " MUs.\n";
         });

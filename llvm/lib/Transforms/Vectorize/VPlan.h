@@ -51,6 +51,7 @@ namespace llvm {
 
 class BasicBlock;
 class DominatorTree;
+class InductionDescriptor;
 class InnerLoopVectorizer;
 class LoopInfo;
 class raw_ostream;
@@ -1005,19 +1006,28 @@ public:
 /// producing their vector and scalar values.
 class VPWidenIntOrFpInductionRecipe : public VPRecipeBase {
   PHINode *IV;
+  const InductionDescriptor &IndDesc;
 
 public:
-  VPWidenIntOrFpInductionRecipe(PHINode *IV, VPValue *Start, Instruction *Cast,
-                                TruncInst *Trunc = nullptr)
-      : VPRecipeBase(VPWidenIntOrFpInductionSC, {Start}), IV(IV) {
-    if (Trunc)
-      new VPValue(Trunc, this);
-    else
-      new VPValue(IV, this);
+  VPWidenIntOrFpInductionRecipe(PHINode *IV, VPValue *Start,
+                                const InductionDescriptor &IndDesc,
+                                Instruction *Cast = nullptr)
+      : VPRecipeBase(VPWidenIntOrFpInductionSC, {Start}), IV(IV),
+        IndDesc(IndDesc) {
+    new VPValue(IV, this);
 
     if (Cast)
       new VPValue(Cast, this);
   }
+
+  VPWidenIntOrFpInductionRecipe(PHINode *IV, VPValue *Start,
+                                const InductionDescriptor &IndDesc,
+                                TruncInst *Trunc)
+      : VPRecipeBase(VPWidenIntOrFpInductionSC, {Start}), IV(IV),
+        IndDesc(IndDesc) {
+    new VPValue(Trunc, this);
+  }
+
   ~VPWidenIntOrFpInductionRecipe() override = default;
 
   /// Method to support type inquiry through isa, cast, and dyn_cast.
@@ -1053,6 +1063,9 @@ public:
   const TruncInst *getTruncInst() const {
     return dyn_cast_or_null<TruncInst>(getVPValue(0)->getUnderlyingValue());
   }
+
+  /// Returns the induction descriptor for the recipe.
+  const InductionDescriptor &getInductionDescriptor() const { return IndDesc; }
 };
 
 /// A recipe for handling first order recurrences and pointer inductions. For
@@ -1169,7 +1182,7 @@ struct VPFirstOrderRecurrencePHIRecipe : public VPWidenPHIRecipe {
 /// operand.
 class VPReductionPHIRecipe : public VPWidenPHIRecipe {
   /// Descriptor for the reduction.
-  RecurrenceDescriptor &RdxDesc;
+  const RecurrenceDescriptor &RdxDesc;
 
   /// The phi is part of an in-loop reduction.
   bool IsInLoop;
@@ -1180,7 +1193,7 @@ class VPReductionPHIRecipe : public VPWidenPHIRecipe {
 public:
   /// Create a new VPReductionPHIRecipe for the reduction \p Phi described by \p
   /// RdxDesc.
-  VPReductionPHIRecipe(PHINode *Phi, RecurrenceDescriptor &RdxDesc,
+  VPReductionPHIRecipe(PHINode *Phi, const RecurrenceDescriptor &RdxDesc,
                        VPValue &Start, bool IsInLoop = false,
                        bool IsOrdered = false)
       : VPWidenPHIRecipe(VPVReductionPHISC, VPReductionPHISC, Phi, &Start),
@@ -1210,7 +1223,9 @@ public:
              VPSlotTracker &SlotTracker) const override;
 #endif
 
-  RecurrenceDescriptor &getRecurrenceDescriptor() { return RdxDesc; }
+  const RecurrenceDescriptor &getRecurrenceDescriptor() const {
+    return RdxDesc;
+  }
 
   /// Returns true, if the phi is part of an ordered reduction.
   bool isOrdered() const { return IsOrdered; }
@@ -1340,13 +1355,13 @@ public:
 /// The Operands are {ChainOp, VecOp, [Condition]}.
 class VPReductionRecipe : public VPRecipeBase, public VPValue {
   /// The recurrence decriptor for the reduction in question.
-  RecurrenceDescriptor *RdxDesc;
+  const RecurrenceDescriptor *RdxDesc;
   /// Pointer to the TTI, needed to create the target reduction
   const TargetTransformInfo *TTI;
 
 public:
-  VPReductionRecipe(RecurrenceDescriptor *R, Instruction *I, VPValue *ChainOp,
-                    VPValue *VecOp, VPValue *CondOp,
+  VPReductionRecipe(const RecurrenceDescriptor *R, Instruction *I,
+                    VPValue *ChainOp, VPValue *VecOp, VPValue *CondOp,
                     const TargetTransformInfo *TTI)
       : VPRecipeBase(VPRecipeBase::VPReductionSC, {ChainOp, VecOp}),
         VPValue(VPValue::VPVReductionSC, I, this), RdxDesc(R), TTI(TTI) {
@@ -2250,6 +2265,12 @@ public:
       return getOrAddVPValue(Op);
     };
     return map_range(Operands, Fn);
+  }
+
+  /// Returns true if \p VPV is uniform after vectorization.
+  bool isUniformAfterVectorization(VPValue *VPV) const {
+    auto RepR = dyn_cast_or_null<VPReplicateRecipe>(VPV->getDef());
+    return !VPV->getDef() || (RepR && RepR->isUniform());
   }
 
 private:

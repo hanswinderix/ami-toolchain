@@ -428,6 +428,8 @@ class GeneratedRTChecks;
 
 namespace llvm {
 
+AnalysisKey ShouldRunExtraVectorPasses::Key;
+
 /// InnerLoopVectorizer vectorizes loops which contain only one basic
 /// block to a specified vectorization factor (VF).
 /// This class performs the widening of scalars into vectors, or multiple
@@ -506,9 +508,9 @@ public:
   /// Widen an integer or floating-point induction variable \p IV. If \p Trunc
   /// is provided, the integer induction variable will first be truncated to
   /// the corresponding type.
-  void widenIntOrFpInduction(PHINode *IV, Value *Start, TruncInst *Trunc,
-                             VPValue *Def, VPValue *CastDef,
-                             VPTransformState &State);
+  void widenIntOrFpInduction(PHINode *IV, const InductionDescriptor &ID,
+                             Value *Start, TruncInst *Trunc, VPValue *Def,
+                             VPValue *CastDef, VPTransformState &State);
 
   /// Construct the vector value of a scalarized value \p V one lane at a time.
   void packScalarIntoVectorValue(VPValue *Def, const VPIteration &Instance,
@@ -534,7 +536,7 @@ public:
 
   /// Returns true if the reordering of FP operations is not allowed, but we are
   /// able to vectorize with strict in-order reductions for the given RdxDesc.
-  bool useOrderedReductions(RecurrenceDescriptor &RdxDesc);
+  bool useOrderedReductions(const RecurrenceDescriptor &RdxDesc);
 
   /// Create a broadcast instruction. This method generates a broadcast
   /// instruction (shuffle) for loop invariant values and for the induction
@@ -2487,17 +2489,13 @@ void InnerLoopVectorizer::recordVectorLoopValueForInductionCast(
     State.set(CastDef, VectorLoopVal, Part);
 }
 
-void InnerLoopVectorizer::widenIntOrFpInduction(PHINode *IV, Value *Start,
-                                                TruncInst *Trunc, VPValue *Def,
-                                                VPValue *CastDef,
+void InnerLoopVectorizer::widenIntOrFpInduction(PHINode *IV,
+                                                const InductionDescriptor &ID,
+                                                Value *Start, TruncInst *Trunc,
+                                                VPValue *Def, VPValue *CastDef,
                                                 VPTransformState &State) {
   assert((IV->getType()->isIntegerTy() || IV != OldInduction) &&
          "Primary induction variable must have an integer type");
-
-  auto II = Legal->getInductionVars().find(IV);
-  assert(II != Legal->getInductionVars().end() && "IV is not an induction");
-
-  auto ID = II->second;
   assert(IV->getType() == ID.getStartValue()->getType() && "Types must match");
 
   // The value from the original loop to which we are mapping the new induction
@@ -3030,14 +3028,12 @@ void InnerLoopVectorizer::scalarizeInstruction(Instruction *Instr,
                                Builder.GetInsertPoint());
   // Replace the operands of the cloned instructions with their scalar
   // equivalents in the new loop.
-  for (unsigned op = 0, e = RepRecipe->getNumOperands(); op != e; ++op) {
-    auto *Operand = dyn_cast<Instruction>(Instr->getOperand(op));
+  for (auto &I : enumerate(RepRecipe->operands())) {
     auto InputInstance = Instance;
-    if (!Operand || !OrigLoop->contains(Operand) ||
-        (Cost->isUniformAfterVectorization(Operand, State.VF)))
+    VPValue *Operand = I.value();
+    if (State.Plan->isUniformAfterVectorization(Operand))
       InputInstance.Lane = VPLane::getFirstLane();
-    auto *NewOp = State.get(RepRecipe->getOperand(op), InputInstance);
-    Cloned->setOperand(op, NewOp);
+    Cloned->setOperand(I.index(), State.get(Operand, InputInstance));
   }
   addNewMetadata(Cloned, Instr);
 
@@ -4573,7 +4569,8 @@ void InnerLoopVectorizer::fixNonInductionPHIs(VPTransformState &State) {
   }
 }
 
-bool InnerLoopVectorizer::useOrderedReductions(RecurrenceDescriptor &RdxDesc) {
+bool InnerLoopVectorizer::useOrderedReductions(
+    const RecurrenceDescriptor &RdxDesc) {
   return Cost->useOrderedReductions(RdxDesc);
 }
 
@@ -5368,13 +5365,9 @@ LoopVectorizationCostModel::getMaxLegalScalableVF(unsigned MaxSafeElements) {
 
   // Limit MaxScalableVF by the maximum safe dependence distance.
   Optional<unsigned> MaxVScale = TTI.getMaxVScale();
-  if (!MaxVScale && TheFunction->hasFnAttribute(Attribute::VScaleRange)) {
-    unsigned VScaleMax = TheFunction->getFnAttribute(Attribute::VScaleRange)
-                             .getVScaleRangeArgs()
-                             .second;
-    if (VScaleMax > 0)
-      MaxVScale = VScaleMax;
-  }
+  if (!MaxVScale && TheFunction->hasFnAttribute(Attribute::VScaleRange))
+    MaxVScale =
+        TheFunction->getFnAttribute(Attribute::VScaleRange).getVScaleRangeMax();
   MaxScalableVF = ElementCount::getScalable(
       MaxVScale ? (MaxSafeElements / MaxVScale.getValue()) : 0);
   if (!MaxScalableVF)
@@ -6068,7 +6061,8 @@ void LoopVectorizationCostModel::collectElementTypesForWidening() {
       if (auto *PN = dyn_cast<PHINode>(&I)) {
         if (!Legal->isReductionVariable(PN))
           continue;
-        const RecurrenceDescriptor &RdxDesc = Legal->getReductionVars()[PN];
+        const RecurrenceDescriptor &RdxDesc =
+            Legal->getReductionVars().find(PN)->second;
         if (PreferInLoopReductions || useOrderedReductions(RdxDesc) ||
             TTI.preferInLoopReduction(RdxDesc.getOpcode(),
                                       RdxDesc.getRecurrenceType(),
@@ -7002,7 +6996,7 @@ Optional<InstructionCost> LoopVectorizationCostModel::getReductionPatternCost(
     ReductionPhi = InLoopReductionImmediateChains[ReductionPhi];
 
   const RecurrenceDescriptor &RdxDesc =
-      Legal->getReductionVars()[cast<PHINode>(ReductionPhi)];
+      Legal->getReductionVars().find(cast<PHINode>(ReductionPhi))->second;
 
   InstructionCost BaseCost = TTI.getArithmeticReductionCost(
       RdxDesc.getOpcode(), VectorTy, RdxDesc.getFastMathFlags(), CostKind);
@@ -7570,8 +7564,12 @@ LoopVectorizationCostModel::getInstructionCost(Instruction *I, ElementCount VF,
     Type *CondTy = SI->getCondition()->getType();
     if (!ScalarCond)
       CondTy = VectorType::get(CondTy, VF);
-    return TTI.getCmpSelInstrCost(I->getOpcode(), VectorTy, CondTy,
-                                  CmpInst::BAD_ICMP_PREDICATE, CostKind, I);
+
+    CmpInst::Predicate Pred = CmpInst::BAD_ICMP_PREDICATE;
+    if (auto *Cmp = dyn_cast<CmpInst>(SI->getCondition()))
+      Pred = Cmp->getPredicate();
+    return TTI.getCmpSelInstrCost(I->getOpcode(), VectorTy, CondTy, Pred,
+                                  CostKind, I);
   }
   case Instruction::ICmp:
   case Instruction::FCmp: {
@@ -7581,7 +7579,8 @@ LoopVectorizationCostModel::getInstructionCost(Instruction *I, ElementCount VF,
       ValTy = IntegerType::get(ValTy->getContext(), MinBWs[Op0AsInstruction]);
     VectorTy = ToVectorTy(ValTy, VF);
     return TTI.getCmpSelInstrCost(I->getOpcode(), VectorTy, nullptr,
-                                  CmpInst::BAD_ICMP_PREDICATE, CostKind, I);
+                                  cast<CmpInst>(I)->getPredicate(), CostKind,
+                                  I);
   }
   case Instruction::Store:
   case Instruction::Load: {
@@ -7762,14 +7761,14 @@ void LoopVectorizationCostModel::collectValuesToIgnore() {
   // Ignore type-promoting instructions we identified during reduction
   // detection.
   for (auto &Reduction : Legal->getReductionVars()) {
-    RecurrenceDescriptor &RedDes = Reduction.second;
+    const RecurrenceDescriptor &RedDes = Reduction.second;
     const SmallPtrSetImpl<Instruction *> &Casts = RedDes.getCastInsts();
     VecValuesToIgnore.insert(Casts.begin(), Casts.end());
   }
   // Ignore type-casting instructions we identified during induction
   // detection.
   for (auto &Induction : Legal->getInductionVars()) {
-    InductionDescriptor &IndDes = Induction.second;
+    const InductionDescriptor &IndDes = Induction.second;
     const SmallVectorImpl<Instruction *> &Casts = IndDes.getCastInsts();
     VecValuesToIgnore.insert(Casts.begin(), Casts.end());
   }
@@ -7778,7 +7777,7 @@ void LoopVectorizationCostModel::collectValuesToIgnore() {
 void LoopVectorizationCostModel::collectInLoopReductions() {
   for (auto &Reduction : Legal->getReductionVars()) {
     PHINode *Phi = Reduction.first;
-    RecurrenceDescriptor &RdxDesc = Reduction.second;
+    const RecurrenceDescriptor &RdxDesc = Reduction.second;
 
     // We don't collect reductions that are type promoted (yet).
     if (RdxDesc.getRecurrenceType() != Phi->getType())
@@ -8073,7 +8072,7 @@ void LoopVectorizationPlanner::collectTriviallyDeadInstructions(
     // will get its scalar/vector/widened def from the scalar/vector/widened def
     // of the respective phi node. Any other casts in the induction def-use chain
     // have no other uses outside the phi update chain, and will be ignored.
-    InductionDescriptor &IndDes = Induction.second;
+    const InductionDescriptor &IndDes = Induction.second;
     const SmallVectorImpl<Instruction *> &Casts = IndDes.getCastInsts();
     DeadInstructions.insert(Casts.begin(), Casts.end());
   }
@@ -8591,14 +8590,12 @@ VPRecipeBuilder::tryToOptimizeInductionPHI(PHINode *Phi,
                                            ArrayRef<VPValue *> Operands) const {
   // Check if this is an integer or fp induction. If so, build the recipe that
   // produces its scalar and vector values.
-  InductionDescriptor II = Legal->getInductionVars().lookup(Phi);
-  if (II.getKind() == InductionDescriptor::IK_IntInduction ||
-      II.getKind() == InductionDescriptor::IK_FpInduction) {
-    assert(II.getStartValue() ==
+  if (auto *II = Legal->getIntOrFpInductionDescriptor(Phi)) {
+    assert(II->getStartValue() ==
            Phi->getIncomingValueForBlock(OrigLoop->getLoopPreheader()));
-    const SmallVectorImpl<Instruction *> &Casts = II.getCastInsts();
+    const SmallVectorImpl<Instruction *> &Casts = II->getCastInsts();
     return new VPWidenIntOrFpInductionRecipe(
-        Phi, Operands[0], Casts.empty() ? nullptr : Casts.front());
+        Phi, Operands[0], *II, Casts.empty() ? nullptr : Casts.front());
   }
 
   return nullptr;
@@ -8624,11 +8621,10 @@ VPWidenIntOrFpInductionRecipe *VPRecipeBuilder::tryToOptimizeInductionTruncate(
   if (LoopVectorizationPlanner::getDecisionAndClampRange(
           isOptimizableIVTruncate(I), Range)) {
 
-    InductionDescriptor II =
-        Legal->getInductionVars().lookup(cast<PHINode>(I->getOperand(0)));
+    auto *Phi = cast<PHINode>(I->getOperand(0));
+    const InductionDescriptor &II = *Legal->getIntOrFpInductionDescriptor(Phi);
     VPValue *Start = Plan.getOrAddVPValue(II.getStartValue());
-    return new VPWidenIntOrFpInductionRecipe(cast<PHINode>(I->getOperand(0)),
-                                             Start, nullptr, I);
+    return new VPWidenIntOrFpInductionRecipe(Phi, Start, II, I);
   }
   return nullptr;
 }
@@ -8910,7 +8906,8 @@ VPRecipeBuilder::tryToCreateWidenRecipe(Instruction *Instr,
     if (Legal->isReductionVariable(Phi) || Legal->isFirstOrderRecurrence(Phi)) {
       VPValue *StartV = Operands[0];
       if (Legal->isReductionVariable(Phi)) {
-        RecurrenceDescriptor &RdxDesc = Legal->getReductionVars()[Phi];
+        const RecurrenceDescriptor &RdxDesc =
+            Legal->getReductionVars().find(Phi)->second;
         assert(RdxDesc.getRecurrenceStartValue() ==
                Phi->getIncomingValueForBlock(OrigLoop->getLoopPreheader()));
         PhiRecipe = new VPReductionPHIRecipe(Phi, RdxDesc, *StartV,
@@ -9031,7 +9028,8 @@ VPlanPtr LoopVectorizationPlanner::buildVPlanWithVPRecipes(
   }
   for (auto &Reduction : CM.getInLoopReductionChains()) {
     PHINode *Phi = Reduction.first;
-    RecurKind Kind = Legal->getReductionVars()[Phi].getRecurrenceKind();
+    RecurKind Kind =
+        Legal->getReductionVars().find(Phi)->second.getRecurrenceKind();
     const SmallVector<Instruction *, 4> &ReductionOperations = Reduction.second;
 
     RecipeBuilder.recordRecipeOf(Phi);
@@ -9165,7 +9163,6 @@ VPlanPtr LoopVectorizationPlanner::buildVPlanWithVPRecipes(
          !Plan->getEntry()->getEntryBasicBlock()->empty() &&
          "entry block must be set to a VPRegionBlock having a non-empty entry "
          "VPBasicBlock");
-  cast<VPRegionBlock>(Plan->getEntry())->setExit(VPBB);
   RecipeBuilder.fixHeaderPhis();
 
   // ---------------------------------------------------------------------------
@@ -9235,6 +9232,8 @@ VPlanPtr LoopVectorizationPlanner::buildVPlanWithVPRecipes(
         VPBB = SplitBlock;
     }
   }
+
+  cast<VPRegionBlock>(Plan->getEntry())->setExit(VPBB);
 
   // Now that sink-after is done, move induction recipes for optimized truncates
   // to the phi section of the header block.
@@ -9355,9 +9354,10 @@ VPlanPtr LoopVectorizationPlanner::buildVPlan(VFRange &Range) {
   }
 
   SmallPtrSet<Instruction *, 1> DeadInstructions;
-  VPlanTransforms::VPInstructionsToVPRecipes(OrigLoop, Plan,
-                                             Legal->getInductionVars(),
-                                             DeadInstructions, *PSE.getSE());
+  VPlanTransforms::VPInstructionsToVPRecipes(
+      OrigLoop, Plan,
+      [this](PHINode *P) { return Legal->getIntOrFpInductionDescriptor(P); },
+      DeadInstructions, *PSE.getSE());
   return Plan;
 }
 
@@ -9371,7 +9371,8 @@ void LoopVectorizationPlanner::adjustRecipesForReductions(
     ElementCount MinVF) {
   for (auto &Reduction : CM.getInLoopReductionChains()) {
     PHINode *Phi = Reduction.first;
-    RecurrenceDescriptor &RdxDesc = Legal->getReductionVars()[Phi];
+    const RecurrenceDescriptor &RdxDesc =
+        Legal->getReductionVars().find(Phi)->second;
     const SmallVector<Instruction *, 4> &ReductionOperations = Reduction.second;
 
     if (MinVF.isScalar() && !CM.useOrderedReductions(RdxDesc))
@@ -9714,9 +9715,9 @@ void VPWidenGEPRecipe::execute(VPTransformState &State) {
 
 void VPWidenIntOrFpInductionRecipe::execute(VPTransformState &State) {
   assert(!State.Instance && "Int or FP induction being replicated.");
-  State.ILV->widenIntOrFpInduction(IV, getStartValue()->getLiveInIRValue(),
-                                   getTruncInst(), getVPValue(0),
-                                   getCastValue(), State);
+  State.ILV->widenIntOrFpInduction(
+      IV, getInductionDescriptor(), getStartValue()->getLiveInIRValue(),
+      getTruncInst(), getVPValue(0), getCastValue(), State);
 }
 
 void VPWidenPHIRecipe::execute(VPTransformState &State) {
@@ -10747,8 +10748,17 @@ PreservedAnalyses LoopVectorizePass::run(Function &F,
       PA.preserve<LoopAnalysis>();
       PA.preserve<DominatorTreeAnalysis>();
     }
-    if (!Result.MadeCFGChange)
+
+    if (Result.MadeCFGChange) {
+      // Making CFG changes likely means a loop got vectorized. Indicate that
+      // extra simplification passes should be run.
+      // TODO: MadeCFGChanges is not a prefect proxy. Extra passes should only
+      // be run if runtime checks have been added.
+      AM.getResult<ShouldRunExtraVectorPasses>(F);
+      PA.preserve<ShouldRunExtraVectorPasses>();
+    } else {
       PA.preserveSet<CFGAnalyses>();
+    }
     return PA;
 }
 
