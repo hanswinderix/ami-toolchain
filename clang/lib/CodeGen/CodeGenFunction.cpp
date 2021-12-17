@@ -382,6 +382,9 @@ void CodeGenFunction::FinishFunction(SourceLocation EndLoc) {
                        "__cyg_profile_func_exit");
   }
 
+  if (ShouldSkipSanitizerInstrumentation())
+    CurFn->addFnAttr(llvm::Attribute::DisableSanitizerInstrumentation);
+
   // Emit debug descriptor for function end.
   if (CGDebugInfo *DI = getDebugInfo())
     DI->EmitFunctionEnd(Builder, CurFn);
@@ -763,22 +766,17 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
       Fn->addFnAttr(llvm::Attribute::NoSanitizeCoverage);
   }
 
-  if (ShouldSkipSanitizerInstrumentation()) {
-    CurFn->addFnAttr(llvm::Attribute::DisableSanitizerInstrumentation);
-  } else {
-    // Apply sanitizer attributes to the function.
-    if (SanOpts.hasOneOf(SanitizerKind::Address | SanitizerKind::KernelAddress))
-      Fn->addFnAttr(llvm::Attribute::SanitizeAddress);
-    if (SanOpts.hasOneOf(SanitizerKind::HWAddress |
-                         SanitizerKind::KernelHWAddress))
-      Fn->addFnAttr(llvm::Attribute::SanitizeHWAddress);
-    if (SanOpts.has(SanitizerKind::MemTag))
-      Fn->addFnAttr(llvm::Attribute::SanitizeMemTag);
-    if (SanOpts.has(SanitizerKind::Thread))
-      Fn->addFnAttr(llvm::Attribute::SanitizeThread);
-    if (SanOpts.hasOneOf(SanitizerKind::Memory | SanitizerKind::KernelMemory))
-      Fn->addFnAttr(llvm::Attribute::SanitizeMemory);
-  }
+  // Apply sanitizer attributes to the function.
+  if (SanOpts.hasOneOf(SanitizerKind::Address | SanitizerKind::KernelAddress))
+    Fn->addFnAttr(llvm::Attribute::SanitizeAddress);
+  if (SanOpts.hasOneOf(SanitizerKind::HWAddress | SanitizerKind::KernelHWAddress))
+    Fn->addFnAttr(llvm::Attribute::SanitizeHWAddress);
+  if (SanOpts.has(SanitizerKind::MemTag))
+    Fn->addFnAttr(llvm::Attribute::SanitizeMemTag);
+  if (SanOpts.has(SanitizerKind::Thread))
+    Fn->addFnAttr(llvm::Attribute::SanitizeThread);
+  if (SanOpts.hasOneOf(SanitizerKind::Memory | SanitizerKind::KernelMemory))
+    Fn->addFnAttr(llvm::Attribute::SanitizeMemory);
   if (SanOpts.has(SanitizerKind::SafeStack))
     Fn->addFnAttr(llvm::Attribute::SafeStack);
   if (SanOpts.has(SanitizerKind::ShadowCallStack))
@@ -1072,7 +1070,8 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
     auto AI = CurFn->arg_begin();
     if (CurFnInfo->getReturnInfo().isSRetAfterThis())
       ++AI;
-    ReturnValue = Address(&*AI, CurFnInfo->getReturnInfo().getIndirectAlign());
+    ReturnValue = Address(&*AI, ConvertTypeForMem(RetTy),
+                          CurFnInfo->getReturnInfo().getIndirectAlign());
     if (!CurFnInfo->getReturnInfo().getIndirectByVal()) {
       ReturnValuePointer =
           CreateDefaultAlignTempAlloca(Int8PtrTy, "result.ptr");
@@ -1300,47 +1299,44 @@ QualType CodeGenFunction::BuildFunctionArgList(GlobalDecl GD,
 
 void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
                                    const CGFunctionInfo &FnInfo) {
+  assert(Fn && "generating code for null Function");
   const FunctionDecl *FD = cast<FunctionDecl>(GD.getDecl());
   CurGD = GD;
 
   FunctionArgList Args;
   QualType ResTy = BuildFunctionArgList(GD, Args);
 
-  // When generating code for a builtin with an inline declaration, use a
-  // mangled name to hold the actual body, while keeping an external definition
-  // in case the function pointer is referenced somewhere.
-  if (Fn) {
-    if (FD->isInlineBuiltinDeclaration()) {
-      std::string FDInlineName = (Fn->getName() + ".inline").str();
-      llvm::Module *M = Fn->getParent();
-      llvm::Function *Clone = M->getFunction(FDInlineName);
-      if (!Clone) {
-        Clone = llvm::Function::Create(Fn->getFunctionType(),
-                                       llvm::GlobalValue::InternalLinkage,
-                                       Fn->getAddressSpace(), FDInlineName, M);
-        Clone->addFnAttr(llvm::Attribute::AlwaysInline);
-      }
-      Fn->setLinkage(llvm::GlobalValue::ExternalLinkage);
-      Fn = Clone;
+  if (FD->isInlineBuiltinDeclaration()) {
+    // When generating code for a builtin with an inline declaration, use a
+    // mangled name to hold the actual body, while keeping an external
+    // definition in case the function pointer is referenced somewhere.
+    std::string FDInlineName = (Fn->getName() + ".inline").str();
+    llvm::Module *M = Fn->getParent();
+    llvm::Function *Clone = M->getFunction(FDInlineName);
+    if (!Clone) {
+      Clone = llvm::Function::Create(Fn->getFunctionType(),
+                                     llvm::GlobalValue::InternalLinkage,
+                                     Fn->getAddressSpace(), FDInlineName, M);
+      Clone->addFnAttr(llvm::Attribute::AlwaysInline);
     }
-
+    Fn->setLinkage(llvm::GlobalValue::ExternalLinkage);
+    Fn = Clone;
+  } else {
     // Detect the unusual situation where an inline version is shadowed by a
     // non-inline version. In that case we should pick the external one
     // everywhere. That's GCC behavior too. Unfortunately, I cannot find a way
     // to detect that situation before we reach codegen, so do some late
     // replacement.
-    else {
-      for (const FunctionDecl *PD = FD->getPreviousDecl(); PD;
-           PD = PD->getPreviousDecl()) {
-        if (LLVM_UNLIKELY(PD->isInlineBuiltinDeclaration())) {
-          std::string FDInlineName = (Fn->getName() + ".inline").str();
-          llvm::Module *M = Fn->getParent();
-          if (llvm::Function *Clone = M->getFunction(FDInlineName)) {
-            Clone->replaceAllUsesWith(Fn);
-            Clone->eraseFromParent();
-          }
-          break;
+    for (const FunctionDecl *PD = FD->getPreviousDecl(); PD;
+         PD = PD->getPreviousDecl()) {
+      if (LLVM_UNLIKELY(PD->isInlineBuiltinDeclaration())) {
+        std::string FDInlineName = (Fn->getName() + ".inline").str();
+        llvm::Module *M = Fn->getParent();
+        if (llvm::Function *Clone = M->getFunction(FDInlineName)) {
+          Clone->replaceAllUsesWith(Fn);
+          Clone->eraseFromParent();
         }
+        break;
       }
     }
   }
@@ -1349,8 +1345,7 @@ void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
   if (FD->hasAttr<NoDebugAttr>()) {
     // Clear non-distinct debug info that was possibly attached to the function
     // due to an earlier declaration without the nodebug attribute
-    if (Fn)
-      Fn->setSubprogram(nullptr);
+    Fn->setSubprogram(nullptr);
     // Disable debug info indefinitely for this function
     DebugInfo = nullptr;
   }
