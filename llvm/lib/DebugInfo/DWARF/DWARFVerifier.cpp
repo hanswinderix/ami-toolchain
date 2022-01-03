@@ -322,12 +322,19 @@ unsigned DWARFVerifier::verifyUnits(const DWARFUnitVector &Units) {
   unsigned NumDebugInfoErrors = 0;
   ReferenceMap CrossUnitReferences;
 
+  unsigned Index = 1;
   for (const auto &Unit : Units) {
-      ReferenceMap UnitLocalReferences;
-      NumDebugInfoErrors +=
-          verifyUnitContents(*Unit, UnitLocalReferences, CrossUnitReferences);
-      NumDebugInfoErrors += verifyDebugInfoReferences(
-          UnitLocalReferences, [&](uint64_t Offset) { return Unit.get(); });
+    OS << "Verifying unit: " << Index << " / " << Units.getNumUnits();
+    if (const char* Name = Unit->getUnitDIE(true).getShortName())
+      OS << ", \"" << Name << '\"';
+    OS << '\n';
+    OS.flush();
+    ReferenceMap UnitLocalReferences;
+    NumDebugInfoErrors +=
+        verifyUnitContents(*Unit, UnitLocalReferences, CrossUnitReferences);
+    NumDebugInfoErrors += verifyDebugInfoReferences(
+        UnitLocalReferences, [&](uint64_t Offset) { return Unit.get(); });
+    ++Index;
   }
 
   NumDebugInfoErrors += verifyDebugInfoReferences(
@@ -557,12 +564,12 @@ unsigned DWARFVerifier::verifyDebugInfoAttribute(const DWARFDie &Die,
         if (Error || !Expression.verify(U))
           ReportError("DIE contains invalid DWARF expression:");
       }
-    } else if (Error E = handleErrors(
+    } else if (Error Err = handleErrors(
                    Loc.takeError(), [&](std::unique_ptr<ResolverError> E) {
                      return U->isDWOUnit() ? Error::success()
                                            : Error(std::move(E));
                    }))
-      ReportError(toString(std::move(E)));
+      ReportError(toString(std::move(Err)));
     break;
   }
   case DW_AT_specification:

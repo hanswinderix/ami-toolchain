@@ -53,7 +53,7 @@ static Optional<int64_t> getResultIndex(AffineMap map, int64_t index) {
 static SmallVector<Attribute, 4> adjustIter(ArrayAttr iteratorTypes,
                                             int64_t index) {
   SmallVector<Attribute, 4> results;
-  for (auto it : llvm::enumerate(iteratorTypes)) {
+  for (const auto &it : llvm::enumerate(iteratorTypes)) {
     int64_t idx = it.index();
     if (idx == index)
       continue;
@@ -871,7 +871,7 @@ struct MultiReduceToContract
     auto srcMap = rewriter.getMultiDimIdentityMap(reductionMask.size());
     SmallVector<AffineExpr> exprs;
     SmallVector<StringRef> iteratorTypes;
-    for (auto isReduceDim : llvm::enumerate(reductionMask)) {
+    for (const auto &isReduceDim : llvm::enumerate(reductionMask)) {
       if (!isReduceDim.value()) {
         iteratorTypes.push_back(getParallelIteratorTypeName());
         exprs.push_back(rewriter.getAffineDimExpr(isReduceDim.index()));
@@ -997,7 +997,7 @@ struct CombineContractBroadcast
           broadcast.getVectorType().getRank() - srcType.getRank();
       bool innerDimBroadcast = false;
       SmallVector<AffineExpr> originalDims;
-      for (auto dim : llvm::enumerate(srcType.getShape())) {
+      for (const auto &dim : llvm::enumerate(srcType.getShape())) {
         if (dim.value() !=
             broadcast.getVectorType().getDimSize(rankDiff + dim.index())) {
           innerDimBroadcast = true;
@@ -1179,7 +1179,7 @@ struct UnrolledOuterProductGenerator
     return builder.create<vector::TransposeOp>(loc, v, perm);
   }
 
-  Value outer_prod(Value lhs, Value rhs, Value res, int reductionSize) {
+  Value outerProd(Value lhs, Value rhs, Value res, int reductionSize) {
     assert(reductionSize > 0);
     for (int64_t k = 0; k < reductionSize; ++k) {
       Value a = builder.create<vector::ExtractOp>(loc, lhs, k);
@@ -1199,31 +1199,31 @@ struct UnrolledOuterProductGenerator
     bindDims(builder.getContext(), m, n, k);
     // Classical row-major matmul:  Just permute the lhs.
     if (layout({{m, k}, {k, n}, {m, n}}))
-      return outer_prod(t(lhs), rhs, res, lhsType.getDimSize(1));
+      return outerProd(t(lhs), rhs, res, lhsType.getDimSize(1));
     // TODO: may be better to fail and use some vector<k> -> scalar reduction.
     if (layout({{m, k}, {n, k}, {m, n}})) {
       Value tlhs = t(lhs);
-      return outer_prod(tlhs, t(rhs), res, lhsType.getDimSize(1));
+      return outerProd(tlhs, t(rhs), res, lhsType.getDimSize(1));
     }
     // No need to permute anything.
     if (layout({{k, m}, {k, n}, {m, n}}))
-      return outer_prod(lhs, rhs, res, lhsType.getDimSize(0));
+      return outerProd(lhs, rhs, res, lhsType.getDimSize(0));
     // Just permute the rhs.
     if (layout({{k, m}, {n, k}, {m, n}}))
-      return outer_prod(lhs, t(rhs), res, lhsType.getDimSize(0));
+      return outerProd(lhs, t(rhs), res, lhsType.getDimSize(0));
     // Transposed output: swap RHS and LHS.
     // Classical row-major matmul: permute the lhs.
     if (layout({{m, k}, {k, n}, {n, m}}))
-      return outer_prod(rhs, t(lhs), res, lhsType.getDimSize(1));
+      return outerProd(rhs, t(lhs), res, lhsType.getDimSize(1));
     // TODO: may be better to fail and use some vector<k> -> scalar reduction.
     if (layout({{m, k}, {n, k}, {n, m}})) {
       Value trhs = t(rhs);
-      return outer_prod(trhs, t(lhs), res, lhsType.getDimSize(1));
+      return outerProd(trhs, t(lhs), res, lhsType.getDimSize(1));
     }
     if (layout({{k, m}, {k, n}, {n, m}}))
-      return outer_prod(rhs, lhs, res, lhsType.getDimSize(0));
+      return outerProd(rhs, lhs, res, lhsType.getDimSize(0));
     if (layout({{k, m}, {n, k}, {n, m}}))
-      return outer_prod(t(rhs), lhs, res, lhsType.getDimSize(0));
+      return outerProd(t(rhs), lhs, res, lhsType.getDimSize(0));
     return failure();
   }
 
@@ -1236,16 +1236,16 @@ struct UnrolledOuterProductGenerator
 
     // Case mat-vec: transpose.
     if (layout({{m, k}, {k}, {m}}))
-      return outer_prod(t(lhs), rhs, res, lhsType.getDimSize(1));
+      return outerProd(t(lhs), rhs, res, lhsType.getDimSize(1));
     // Case mat-trans-vec: ready to go.
     if (layout({{k, m}, {k}, {m}}))
-      return outer_prod(lhs, rhs, res, lhsType.getDimSize(0));
+      return outerProd(lhs, rhs, res, lhsType.getDimSize(0));
     // Case vec-mat: swap and transpose.
     if (layout({{k}, {m, k}, {m}}))
-      return outer_prod(t(rhs), lhs, res, lhsType.getDimSize(0));
+      return outerProd(t(rhs), lhs, res, lhsType.getDimSize(0));
     // Case vec-mat-trans: swap and ready to go.
     if (layout({{k}, {k, m}, {m}}))
-      return outer_prod(rhs, lhs, res, lhsType.getDimSize(0));
+      return outerProd(rhs, lhs, res, lhsType.getDimSize(0));
     return failure();
   }
 
@@ -1260,16 +1260,16 @@ struct UnrolledOuterProductGenerator
 
     // Case mat-vec: transpose.
     if (layout({{m, k}, {k}, {m}}))
-      return outer_prod(t(lhs), rhs, res, lhsType.getDimSize(1));
+      return outerProd(t(lhs), rhs, res, lhsType.getDimSize(1));
     // Case mat-trans-vec: ready to go.
     if (layout({{k, m}, {k}, {m}}))
-      return outer_prod(lhs, rhs, res, lhsType.getDimSize(0));
+      return outerProd(lhs, rhs, res, lhsType.getDimSize(0));
     // Case vec-mat: swap and transpose.
     if (layout({{k}, {m, k}, {m}}))
-      return outer_prod(t(rhs), lhs, res, lhsType.getDimSize(0));
+      return outerProd(t(rhs), lhs, res, lhsType.getDimSize(0));
     // Case vec-mat-trans: swap and ready to go.
     if (layout({{k}, {k, m}, {m}}))
-      return outer_prod(rhs, lhs, res, lhsType.getDimSize(0));
+      return outerProd(rhs, lhs, res, lhsType.getDimSize(0));
     return failure();
   }
 

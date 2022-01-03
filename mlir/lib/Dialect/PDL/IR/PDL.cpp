@@ -198,7 +198,7 @@ static LogicalResult verifyResultTypesAreInferrable(OperationOp op,
     return success();
 
   // Otherwise, make sure each of the types can be inferred.
-  for (auto it : llvm::enumerate(resultTypes)) {
+  for (const auto &it : llvm::enumerate(resultTypes)) {
     Operation *resultTypeOp = it.value().getDefiningOp();
     assert(resultTypeOp && "expected valid result type operation");
 
@@ -271,8 +271,8 @@ bool OperationOp::hasTypeInference() {
 static LogicalResult verify(PatternOp pattern) {
   Region &body = pattern.body();
   Operation *term = body.front().getTerminator();
-  auto rewrite_op = dyn_cast<RewriteOp>(term);
-  if (!rewrite_op) {
+  auto rewriteOp = dyn_cast<RewriteOp>(term);
+  if (!rewriteOp) {
     return pattern.emitOpError("expected body to terminate with `pdl.rewrite`")
         .attachNote(term->getLoc())
         .append("see terminator defined here");

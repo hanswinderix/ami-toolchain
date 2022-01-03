@@ -42,6 +42,7 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/ProfileData/InstrProf.h"
+#include "llvm/ProfileData/InstrProfCorrelator.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
@@ -247,8 +248,7 @@ public:
   PGOCounterPromoter(
       DenseMap<Loop *, SmallVector<LoadStorePair, 8>> &LoopToCands,
       Loop &CurLoop, LoopInfo &LI, BlockFrequencyInfo *BFI)
-      : LoopToCandidates(LoopToCands), ExitBlocks(), InsertPts(), L(CurLoop),
-        LI(LI), BFI(BFI) {
+      : LoopToCandidates(LoopToCands), L(CurLoop), LI(LI), BFI(BFI) {
 
     // Skip collection of ExitBlocks and InsertPts for loops that will not be
     // able to have counters promoted.
@@ -941,15 +941,15 @@ InstrProfiling::getOrCreateRegionCounters(InstrProfIncrementInst *Inc) {
     if (auto *SP = Fn->getSubprogram()) {
       DIBuilder DB(*M, true, SP->getUnit());
       Metadata *FunctionNameAnnotation[] = {
-          MDString::get(Ctx, "Function Name"),
+          MDString::get(Ctx, InstrProfCorrelator::FunctionNameAttributeName),
           MDString::get(Ctx, getPGOFuncNameVarInitializer(NamePtr)),
       };
       Metadata *CFGHashAnnotation[] = {
-          MDString::get(Ctx, "CFG Hash"),
+          MDString::get(Ctx, InstrProfCorrelator::CFGHashAttributeName),
           ConstantAsMetadata::get(Inc->getHash()),
       };
       Metadata *NumCountersAnnotation[] = {
-          MDString::get(Ctx, "Num Counters"),
+          MDString::get(Ctx, InstrProfCorrelator::NumCountersAttributeName),
           ConstantAsMetadata::get(Inc->getNumCounters()),
       };
       auto Annotations = DB.getOrCreateArray({
@@ -996,8 +996,11 @@ InstrProfiling::getOrCreateRegionCounters(InstrProfIncrementInst *Inc) {
         ConstantExpr::getBitCast(ValuesVar, Type::getInt8PtrTy(Ctx));
   }
 
-  if (DebugInfoCorrelate)
+  if (DebugInfoCorrelate) {
+    // Mark the counter variable as used so that it isn't optimized out.
+    CompilerUsedVars.push_back(PD.RegionCounters);
     return PD.RegionCounters;
+  }
 
   // Create data variable.
   auto *IntPtrTy = M->getDataLayout().getIntPtrType(M->getContext());

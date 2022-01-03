@@ -242,10 +242,10 @@ llvm::Constant *mlir::LLVM::detail::getLLVMConstant(
     if (auto *arrayTy = dyn_cast<llvm::ArrayType>(llvmType)) {
       elementType = arrayTy->getElementType();
       numElements = arrayTy->getNumElements();
-    } else if (auto fVectorTy = dyn_cast<llvm::FixedVectorType>(llvmType)) {
+    } else if (auto *fVectorTy = dyn_cast<llvm::FixedVectorType>(llvmType)) {
       elementType = fVectorTy->getElementType();
       numElements = fVectorTy->getNumElements();
-    } else if (auto sVectorTy = dyn_cast<llvm::ScalableVectorType>(llvmType)) {
+    } else if (auto *sVectorTy = dyn_cast<llvm::ScalableVectorType>(llvmType)) {
       elementType = sVectorTy->getElementType();
       numElements = sVectorTy->getMinNumElements();
     } else {
@@ -381,7 +381,7 @@ static Value getPHISourceValue(Block *current, Block *pred,
     // the case branch that was taken.
     if (switchOp.getDefaultDestination() == current)
       return switchOp.getDefaultOperands()[index];
-    for (auto i : llvm::enumerate(switchOp.getCaseDestinations()))
+    for (const auto &i : llvm::enumerate(switchOp.getCaseDestinations()))
       if (i.value() == current)
         return switchOp.getCaseOperands(i.index())[index];
   }

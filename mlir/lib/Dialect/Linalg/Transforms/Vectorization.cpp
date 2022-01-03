@@ -38,8 +38,6 @@
 using namespace mlir;
 using namespace mlir::linalg;
 
-using llvm::dbgs;
-
 #define DEBUG_TYPE "linalg-vectorization"
 
 #define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
@@ -82,7 +80,7 @@ static OpType getSingleOpOfType(Block &block) {
 /// map is reindexed to `affine_map<(d0, d1, d2) -> (d2, d0, d1)>`, the second
 /// affine map is reindexed to `affine_map<(d0, d1) -> (d0, d1)>`.
 static AffineMap reindexIndexingMap(AffineMap map) {
-  assert(map.isProjectedPermutation(/*allowZerosInResults=*/true) &&
+  assert(map.isProjectedPermutation(/*allowZeroInResults=*/true) &&
          "expected projected permutation");
   auto res = compressUnusedDims(map);
   assert(res.getNumDims() == res.getNumResults() &&
@@ -251,7 +249,7 @@ vectorizeLinalgYield(OpBuilder &b, Operation *op,
   auto yieldOp = dyn_cast<linalg::YieldOp>(op);
   if (!yieldOp)
     return VectorizationResult{VectorizationStatus::Failure, nullptr};
-  for (auto outputs : llvm::enumerate(yieldOp.values())) {
+  for (const auto &outputs : llvm::enumerate(yieldOp.values())) {
     // TODO: Scan for an opportunity for reuse.
     // TODO: use a map.
     Value vectorValue = bvm.lookup(outputs.value());
@@ -578,7 +576,7 @@ vectorizeAsLinalgGeneric(OpBuilder &b, LinalgOp linalgOp,
 // TODO: drop reliance on a specific pattern.
 static bool allIndexingsAreProjectedPermutation(LinalgOp op) {
   return llvm::all_of(op.getIndexingMaps(), [](AffineMap m) {
-    return m.isProjectedPermutation(/*allowZerosInResults=*/true);
+    return m.isProjectedPermutation(/*allowZeroInResults=*/true);
   });
 }
 
@@ -1426,9 +1424,9 @@ namespace {
 ///   Layout: {{n, strideW * w + dilationW * kw, c}, {kw, c}, {n, w, c}}
 /// ```
 /// kw is unrolled, w is unrolled iff dilationW > 1.
-struct Conv1D_NWC_Generator : public StructuredGenerator<LinalgOp> {
-  Conv1D_NWC_Generator(OpBuilder &builder, LinalgOp linalgOp, int strideW,
-                       int dilationW)
+struct Conv1DNwcGenerator : public StructuredGenerator<LinalgOp> {
+  Conv1DNwcGenerator(OpBuilder &builder, LinalgOp linalgOp, int strideW,
+                     int dilationW)
       : StructuredGenerator<LinalgOp>(builder, linalgOp), valid(false),
         strideW(strideW), dilationW(dilationW) {
     // Determine whether `linalgOp` can be generated with this generator
@@ -1594,7 +1592,7 @@ struct Conv1D_NWC_Generator : public StructuredGenerator<LinalgOp> {
   /// ```
   /// kw is always unrolled.
   /// TODO: w (resp. kw) is unrolled when the strideW ( resp. dilationW) is > 1.
-  FailureOr<Operation *> dilated_conv() {
+  FailureOr<Operation *> dilatedConv() {
     if (!valid)
       return failure();
 
@@ -1730,7 +1728,7 @@ struct Conv1D_NWC_Generator : public StructuredGenerator<LinalgOp> {
     if (layout({/*lhsIndex*/ {n, strideW * w + dilationW * kw, c},
                 /*rhsIndex*/ {kw, c},
                 /*resIndex*/ {n, w, c}}))
-      return dilated_conv();
+      return dilatedConv();
     return failure();
   }
 
@@ -1752,7 +1750,7 @@ vectorizeConvolution(OpBuilder &b, ConvolutionOpInterface convOp) {
   auto stride = strides ? *strides.getValues<uint64_t>().begin() : 1;
   auto dilation = dilations ? *dilations.getValues<uint64_t>().begin() : 1;
   LinalgOp linalgOp = cast<LinalgOp>(convOp.getOperation());
-  Conv1D_NWC_Generator e(b, linalgOp, stride, dilation);
+  Conv1DNwcGenerator e(b, linalgOp, stride, dilation);
   auto res = e.generateConv();
   if (succeeded(res))
     return res;

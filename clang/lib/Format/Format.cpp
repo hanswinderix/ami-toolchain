@@ -3050,8 +3050,7 @@ reformat(const FormatStyle &Style, StringRef Code,
       });
   }
 
-  if (Style.Language == FormatStyle::LK_JavaScript &&
-      Style.JavaScriptQuotes != FormatStyle::JSQS_Leave)
+  if (Style.isJavaScript() && Style.JavaScriptQuotes != FormatStyle::JSQS_Leave)
     Passes.emplace_back([&](const Environment &Env) {
       return JavaScriptRequoter(Env, Expanded).process();
     });
@@ -3060,7 +3059,7 @@ reformat(const FormatStyle &Style, StringRef Code,
     return Formatter(Env, Expanded, Status).process();
   });
 
-  if (Style.Language == FormatStyle::LK_JavaScript &&
+  if (Style.isJavaScript() &&
       Style.InsertTrailingCommas == FormatStyle::TCS_Wrapped)
     Passes.emplace_back([&](const Environment &Env) {
       return TrailingCommaInserter(Env, Expanded).process();
@@ -3182,6 +3181,8 @@ const char *StyleOptionHelpDescription =
     ".clang-format file located in one of the parent\n"
     "directories of the source file (or current\n"
     "directory for stdin).\n"
+    "Use -style=file:<format_file_path> to explicitly specify"
+    "the configuration file.\n"
     "Use -style=\"{key: value, ...}\" to set specific\n"
     "parameters, e.g.:\n"
     "  -style=\"{BasedOnStyle: llvm, IndentWidth: 8}\"";
@@ -3234,6 +3235,18 @@ const char *DefaultFormatStyle = "file";
 
 const char *DefaultFallbackStyle = "LLVM";
 
+llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
+loadAndParseConfigFile(StringRef ConfigFile, llvm::vfs::FileSystem *FS,
+                       FormatStyle *Style, bool AllowUnknownOptions) {
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> Text =
+      FS->getBufferForFile(ConfigFile.str());
+  if (auto EC = Text.getError())
+    return EC;
+  if (auto EC = parseConfiguration(*Text.get(), Style, AllowUnknownOptions))
+    return EC;
+  return Text;
+}
+
 llvm::Expected<FormatStyle> getStyle(StringRef StyleName, StringRef FileName,
                                      StringRef FallbackStyleName,
                                      StringRef Code, llvm::vfs::FileSystem *FS,
@@ -3264,6 +3277,28 @@ llvm::Expected<FormatStyle> getStyle(StringRef StyleName, StringRef FileName,
       return Style;
   }
 
+  // User provided clang-format file using -style=file:path/to/format/file.
+  if (!Style.InheritsParentConfig &&
+      StyleName.startswith_insensitive("file:")) {
+    auto ConfigFile = StyleName.substr(5);
+    llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> Text =
+        loadAndParseConfigFile(ConfigFile, FS, &Style, AllowUnknownOptions);
+    if (auto EC = Text.getError())
+      return make_string_error("Error reading " + ConfigFile + ": " +
+                               EC.message());
+
+    LLVM_DEBUG(llvm::dbgs()
+               << "Using configuration file " << ConfigFile << "\n");
+
+    if (!Style.InheritsParentConfig)
+      return Style;
+
+    // Search for parent configs starting from the parent directory of
+    // ConfigFile.
+    FileName = ConfigFile;
+    ChildFormatTextToApply.emplace_back(std::move(*Text));
+  }
+
   // If the style inherits the parent configuration it is a command line
   // configuration, which wants to inherit, so we have to skip the check of the
   // StyleName.
@@ -3289,6 +3324,16 @@ llvm::Expected<FormatStyle> getStyle(StringRef StyleName, StringRef FileName,
 
   auto dropDiagnosticHandler = [](const llvm::SMDiagnostic &, void *) {};
 
+  auto applyChildFormatTexts = [&](FormatStyle *Style) {
+    for (const auto &MemBuf : llvm::reverse(ChildFormatTextToApply)) {
+      auto EC = parseConfiguration(*MemBuf, Style, AllowUnknownOptions,
+                                   dropDiagnosticHandler);
+      // It was already correctly parsed.
+      assert(!EC);
+      static_cast<void>(EC);
+    }
+  };
+
   for (StringRef Directory = Path; !Directory.empty();
        Directory = llvm::sys::path::parent_path(Directory)) {
 
@@ -3309,19 +3354,16 @@ llvm::Expected<FormatStyle> getStyle(StringRef StyleName, StringRef FileName,
       if (Status &&
           (Status->getType() == llvm::sys::fs::file_type::regular_file)) {
         llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> Text =
-            FS->getBufferForFile(ConfigFile.str());
-        if (std::error_code EC = Text.getError())
-          return make_string_error(EC.message());
-        if (std::error_code ec =
-                parseConfiguration(*Text.get(), &Style, AllowUnknownOptions)) {
-          if (ec == ParseError::Unsuitable) {
+            loadAndParseConfigFile(ConfigFile, FS, &Style, AllowUnknownOptions);
+        if (auto EC = Text.getError()) {
+          if (EC == ParseError::Unsuitable) {
             if (!UnsuitableConfigFiles.empty())
               UnsuitableConfigFiles.append(", ");
             UnsuitableConfigFiles.append(ConfigFile);
             continue;
           }
           return make_string_error("Error reading " + ConfigFile + ": " +
-                                   ec.message());
+                                   EC.message());
         }
         LLVM_DEBUG(llvm::dbgs()
                    << "Using configuration file " << ConfigFile << "\n");
@@ -3331,14 +3373,7 @@ llvm::Expected<FormatStyle> getStyle(StringRef StyleName, StringRef FileName,
             return Style;
 
           LLVM_DEBUG(llvm::dbgs() << "Applying child configurations\n");
-
-          for (const auto &MemBuf : llvm::reverse(ChildFormatTextToApply)) {
-            auto Ec = parseConfiguration(*MemBuf, &Style, AllowUnknownOptions,
-                                         dropDiagnosticHandler);
-            // It was already correctly parsed.
-            assert(!Ec);
-            static_cast<void>(Ec);
-          }
+          applyChildFormatTexts(&Style);
 
           return Style;
         }
@@ -3364,17 +3399,9 @@ llvm::Expected<FormatStyle> getStyle(StringRef StyleName, StringRef FileName,
                              UnsuitableConfigFiles);
 
   if (!ChildFormatTextToApply.empty()) {
-    assert(ChildFormatTextToApply.size() == 1);
-
     LLVM_DEBUG(llvm::dbgs()
-               << "Applying child configuration on fallback style\n");
-
-    auto Ec =
-        parseConfiguration(*ChildFormatTextToApply.front(), &FallbackStyle,
-                           AllowUnknownOptions, dropDiagnosticHandler);
-    // It was already correctly parsed.
-    assert(!Ec);
-    static_cast<void>(Ec);
+               << "Applying child configurations on fallback style\n");
+    applyChildFormatTexts(&FallbackStyle);
   }
 
   return FallbackStyle;

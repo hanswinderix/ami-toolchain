@@ -771,8 +771,8 @@ static void buildExplicitValuePadOpWithQuantInfo(OpBuilder &builder,
                                                  OperationState &result,
                                                  Type outputType, Value input,
                                                  Value paddings,
-                                                 Value pad_const) {
-  result.addOperands({input, paddings, pad_const});
+                                                 Value padConst) {
+  result.addOperands({input, paddings, padConst});
   auto quantAttr = buildPadOpQuantizationAttr(builder, input);
   if (quantAttr)
     result.addAttribute("quantization_info", quantAttr);
@@ -1791,7 +1791,7 @@ LogicalResult IfOp::inferReturnTypeComponents(
     if (resultKnowledge.size() != yieldOp.getNumOperands())
       return failure();
 
-    for (auto it : llvm::enumerate(yieldOp.getOperands())) {
+    for (const auto &it : llvm::enumerate(yieldOp.getOperands())) {
       int32_t index = it.index();
       auto meet = ValueKnowledge::meet(
           resultKnowledge[index],
@@ -1835,7 +1835,7 @@ LogicalResult WhileOp::inferReturnTypeComponents(
     if (resultKnowledge.size() != yieldOp.getNumOperands())
       return failure();
 
-    for (auto it : llvm::enumerate(yieldOp.getOperands())) {
+    for (const auto &it : llvm::enumerate(yieldOp.getOperands())) {
       int32_t index = it.index();
       if (auto meet = ValueKnowledge::meet(
               resultKnowledge[index],

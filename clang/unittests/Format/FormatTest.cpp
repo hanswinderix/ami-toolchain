@@ -262,8 +262,8 @@ TEST_F(FormatTest, RemovesEmptyLines) {
                    "}",
                    getGoogleStyle()));
 
-  auto CustomStyle = clang::format::getLLVMStyle();
-  CustomStyle.BreakBeforeBraces = clang::format::FormatStyle::BS_Custom;
+  auto CustomStyle = getLLVMStyle();
+  CustomStyle.BreakBeforeBraces = FormatStyle::BS_Custom;
   CustomStyle.BraceWrapping.AfterNamespace = true;
   CustomStyle.KeepEmptyLinesAtTheStartOfBlocks = false;
   EXPECT_EQ("namespace N\n"
@@ -2504,11 +2504,26 @@ TEST_F(FormatTest, ShortEnums) {
   FormatStyle Style = getLLVMStyle();
   Style.AllowShortEnumsOnASingleLine = true;
   verifyFormat("enum { A, B, C } ShortEnum1, ShortEnum2;", Style);
+  verifyFormat("typedef enum { A, B, C } ShortEnum1, ShortEnum2;", Style);
   Style.AllowShortEnumsOnASingleLine = false;
   verifyFormat("enum {\n"
                "  A,\n"
                "  B,\n"
                "  C\n"
+               "} ShortEnum1, ShortEnum2;",
+               Style);
+  verifyFormat("typedef enum {\n"
+               "  A,\n"
+               "  B,\n"
+               "  C\n"
+               "} ShortEnum1, ShortEnum2;",
+               Style);
+  verifyFormat("enum {\n"
+               "  A,\n"
+               "} ShortEnum1, ShortEnum2;",
+               Style);
+  verifyFormat("typedef enum {\n"
+               "  A,\n"
                "} ShortEnum1, ShortEnum2;",
                Style);
   Style.BreakBeforeBraces = FormatStyle::BS_Custom;
@@ -2743,10 +2758,9 @@ TEST_F(FormatTest, FormatsLabels) {
 }
 
 TEST_F(FormatTest, MultiLineControlStatements) {
-  FormatStyle Style = getLLVMStyle();
+  FormatStyle Style = getLLVMStyleWithColumns(20);
   Style.BreakBeforeBraces = FormatStyle::BraceBreakingStyle::BS_Custom;
   Style.BraceWrapping.AfterControlStatement = FormatStyle::BWACS_MultiLine;
-  Style.ColumnLimit = 20;
   // Short lines should keep opening brace on same line.
   EXPECT_EQ("if (foo) {\n"
             "  bar();\n"
@@ -3313,8 +3327,7 @@ TEST_F(FormatTest, FormatsEnumTypes) {
 }
 
 TEST_F(FormatTest, FormatsTypedefEnum) {
-  FormatStyle Style = getLLVMStyle();
-  Style.ColumnLimit = 40;
+  FormatStyle Style = getLLVMStyleWithColumns(40);
   verifyFormat("typedef enum {} EmptyEnum;");
   verifyFormat("typedef enum { A, B, C } ShortEnum;");
   verifyFormat("typedef enum {\n"
@@ -3548,6 +3561,19 @@ TEST_F(FormatTest, FormatsNamespaces) {
                    "} // namespace in\n"
                    "} // namespace out",
                    Style));
+
+  Style.NamespaceIndentation = FormatStyle::NI_None;
+  verifyFormat("template <class T>\n"
+               "concept a_concept = X<>;\n"
+               "namespace B {\n"
+               "struct b_struct {};\n"
+               "} // namespace B\n",
+               Style);
+  verifyFormat("template <int I> constexpr void foo requires(I == 42) {}\n"
+               "namespace ns {\n"
+               "void foo() {}\n"
+               "} // namespace ns\n",
+               Style);
 }
 
 TEST_F(FormatTest, NamespaceMacros) {
@@ -3835,34 +3861,64 @@ TEST_F(FormatTest, IndentExternBlockStyle) {
   Style.IndentWidth = 2;
 
   Style.IndentExternBlock = FormatStyle::IEBS_Indent;
-  verifyFormat("extern \"C\" { /*9*/\n}", Style);
+  verifyFormat("extern \"C\" { /*9*/\n"
+               "}",
+               Style);
   verifyFormat("extern \"C\" {\n"
                "  int foo10();\n"
                "}",
                Style);
 
   Style.IndentExternBlock = FormatStyle::IEBS_NoIndent;
-  verifyFormat("extern \"C\" { /*11*/\n}", Style);
+  verifyFormat("extern \"C\" { /*11*/\n"
+               "}",
+               Style);
   verifyFormat("extern \"C\" {\n"
                "int foo12();\n"
                "}",
                Style);
 
-  Style.IndentExternBlock = FormatStyle::IEBS_AfterExternBlock;
   Style.BreakBeforeBraces = FormatStyle::BS_Custom;
   Style.BraceWrapping.AfterExternBlock = true;
-  verifyFormat("extern \"C\"\n{ /*13*/\n}", Style);
+  Style.IndentExternBlock = FormatStyle::IEBS_Indent;
+  verifyFormat("extern \"C\"\n"
+               "{ /*13*/\n"
+               "}",
+               Style);
   verifyFormat("extern \"C\"\n{\n"
                "  int foo14();\n"
                "}",
                Style);
 
-  Style.IndentExternBlock = FormatStyle::IEBS_AfterExternBlock;
-  Style.BreakBeforeBraces = FormatStyle::BS_Custom;
   Style.BraceWrapping.AfterExternBlock = false;
-  verifyFormat("extern \"C\" { /*15*/\n}", Style);
+  Style.IndentExternBlock = FormatStyle::IEBS_NoIndent;
+  verifyFormat("extern \"C\" { /*15*/\n"
+               "}",
+               Style);
   verifyFormat("extern \"C\" {\n"
                "int foo16();\n"
+               "}",
+               Style);
+
+  Style.BraceWrapping.AfterExternBlock = true;
+  verifyFormat("extern \"C\"\n"
+               "{ /*13*/\n"
+               "}",
+               Style);
+  verifyFormat("extern \"C\"\n"
+               "{\n"
+               "int foo14();\n"
+               "}",
+               Style);
+
+  Style.IndentExternBlock = FormatStyle::IEBS_Indent;
+  verifyFormat("extern \"C\"\n"
+               "{ /*13*/\n"
+               "}",
+               Style);
+  verifyFormat("extern \"C\"\n"
+               "{\n"
+               "  int foo14();\n"
                "}",
                Style);
 }
@@ -4396,6 +4452,13 @@ TEST_F(FormatTest, MacroDefinitionInsideStatement) {
 
 TEST_F(FormatTest, HashInMacroDefinition) {
   EXPECT_EQ("#define A(c) L#c", format("#define A(c) L#c", getLLVMStyle()));
+  EXPECT_EQ("#define A(c) u#c", format("#define A(c) u#c", getLLVMStyle()));
+  EXPECT_EQ("#define A(c) U#c", format("#define A(c) U#c", getLLVMStyle()));
+  EXPECT_EQ("#define A(c) u8#c", format("#define A(c) u8#c", getLLVMStyle()));
+  EXPECT_EQ("#define A(c) LR#c", format("#define A(c) LR#c", getLLVMStyle()));
+  EXPECT_EQ("#define A(c) uR#c", format("#define A(c) uR#c", getLLVMStyle()));
+  EXPECT_EQ("#define A(c) UR#c", format("#define A(c) UR#c", getLLVMStyle()));
+  EXPECT_EQ("#define A(c) u8R#c", format("#define A(c) u8R#c", getLLVMStyle()));
   verifyFormat("#define A \\\n  b #c;", getLLVMStyleWithColumns(11));
   verifyFormat("#define A  \\\n"
                "  {        \\\n"
@@ -4743,9 +4806,8 @@ TEST_F(FormatTest, LayoutMacroDefinitionsStatementsSpanningBlocks) {
 }
 
 TEST_F(FormatTest, IndentPreprocessorDirectives) {
-  FormatStyle Style = getLLVMStyle();
+  FormatStyle Style = getLLVMStyleWithColumns(40);
   Style.IndentPPDirectives = FormatStyle::PPDIS_None;
-  Style.ColumnLimit = 40;
   verifyFormat("#ifdef _WIN32\n"
                "#define A 0\n"
                "#ifdef VAR2\n"
@@ -5935,10 +5997,9 @@ TEST_F(FormatTest, BreakingBeforeNonAssigmentOperators) {
 }
 
 TEST_F(FormatTest, AllowBinPackingInsideArguments) {
-  FormatStyle Style = getLLVMStyle();
+  FormatStyle Style = getLLVMStyleWithColumns(40);
   Style.BreakBeforeBinaryOperators = FormatStyle::BOS_NonAssignment;
   Style.BinPackArguments = false;
-  Style.ColumnLimit = 40;
   verifyFormat("void test() {\n"
                "  someFunction(\n"
                "      this + argument + is + quite\n"
@@ -6117,9 +6178,8 @@ TEST_F(FormatTest, ConstructorInitializers) {
 }
 
 TEST_F(FormatTest, AllowAllConstructorInitializersOnNextLine) {
-  FormatStyle Style = getLLVMStyle();
+  FormatStyle Style = getLLVMStyleWithColumns(60);
   Style.BreakConstructorInitializers = FormatStyle::BCIS_BeforeComma;
-  Style.ColumnLimit = 60;
   Style.BinPackParameters = false;
 
   for (int i = 0; i < 4; ++i) {
@@ -6247,8 +6307,7 @@ TEST_F(FormatTest, AllowAllConstructorInitializersOnNextLine) {
 }
 
 TEST_F(FormatTest, AllowAllArgumentsOnNextLine) {
-  FormatStyle Style = getLLVMStyle();
-  Style.ColumnLimit = 60;
+  FormatStyle Style = getLLVMStyleWithColumns(60);
   Style.BinPackArguments = false;
   for (int i = 0; i < 4; ++i) {
     // Test all combinations of parameters that should not have an effect.
@@ -6302,8 +6361,7 @@ TEST_F(FormatTest, AllowAllArgumentsOnNextLine) {
 TEST_F(FormatTest, AllowAllArgumentsOnNextLineDontAlign) {
   // Check that AllowAllArgumentsOnNextLine is respected for both BAS_DontAlign
   // and BAS_Align.
-  auto Style = getLLVMStyle();
-  Style.ColumnLimit = 35;
+  FormatStyle Style = getLLVMStyleWithColumns(35);
   StringRef Input = "functionCall(paramA, paramB, paramC);\n"
                     "void functionDecl(int A, int B, int C);";
   Style.AllowAllArgumentsOnNextLine = false;
@@ -6773,6 +6831,9 @@ TEST_F(FormatTest, TrailingReturnType) {
 
   // Not trailing return types.
   verifyFormat("void f() { auto a = b->c(); }");
+  verifyFormat("auto a = p->foo();");
+  verifyFormat("int a = p->foo();");
+  verifyFormat("auto lmbd = [] NOEXCEPT -> int { return 0; };");
 }
 
 TEST_F(FormatTest, DeductionGuides) {
@@ -6801,8 +6862,7 @@ TEST_F(FormatTest, DeductionGuides) {
 TEST_F(FormatTest, BreaksFunctionDeclarationsWithTrailingTokens) {
   // Avoid breaking before trailing 'const' or other trailing annotations, if
   // they are not function-like.
-  FormatStyle Style = getGoogleStyle();
-  Style.ColumnLimit = 47;
+  FormatStyle Style = getGoogleStyleWithColumns(47);
   verifyFormat("void someLongFunction(\n"
                "    int someLoooooooooooooongParameter) const {\n}",
                getLLVMStyleWithColumns(47));
@@ -7621,8 +7681,7 @@ TEST_F(FormatTest, BreaksConditionalExpressions) {
                "                     : a;");
 
   // Chained conditionals
-  FormatStyle Style = getLLVMStyle();
-  Style.ColumnLimit = 70;
+  FormatStyle Style = getLLVMStyleWithColumns(70);
   Style.AlignOperands = FormatStyle::OAS_Align;
   verifyFormat("return aaaaaaaaaaaaaaaa ? 1111111111111111\n"
                "       : bbbbbbbbbbbbbb ? 2222222222222222\n"
@@ -7775,9 +7834,8 @@ TEST_F(FormatTest, BreaksConditionalExpressions) {
 }
 
 TEST_F(FormatTest, BreaksConditionalExpressionsAfterOperator) {
-  FormatStyle Style = getLLVMStyle();
+  FormatStyle Style = getLLVMStyleWithColumns(70);
   Style.BreakBeforeTernaryOperators = false;
-  Style.ColumnLimit = 70;
   verifyFormat(
       "aaaa(aaaaaaaaaaaaaaaaaaaa, aaaaaaaaaaaaaaaaaaaaaaaaaa ?\n"
       "                               aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa :\n"
@@ -11475,6 +11533,17 @@ TEST_F(FormatTest, LayoutCxx11BraceInitializers) {
                "  };\n"
                "};");
   verifyFormat("#define A {a, a},");
+  // Don't confuse braced list initializers with compound statements.
+  verifyFormat(
+      "class A {\n"
+      "  A() : a{} {}\n"
+      "  A(int b) : b(b) {}\n"
+      "  A(int a, int b) : a(a), bs{{bs...}} { f(); }\n"
+      "  int a, b;\n"
+      "  explicit Expr(const Scalar<Result> &x) : u{Constant<Result>{x}} {}\n"
+      "  explicit Expr(Scalar<Result> &&x) : u{Constant<Result>{std::move(x)}} "
+      "{}\n"
+      "};");
 
   // Avoid breaking between equal sign and opening brace
   FormatStyle AvoidBreakingFirstArgument = getLLVMStyle();
@@ -11827,27 +11896,6 @@ TEST_F(FormatTest, FormatsBracedListsInColumnLayout) {
                "  f(v);\n"
                "}");
 
-  verifyFormat("void foo() {\n"
-               "  { // asdf\n"
-               "    { int a; }\n"
-               "  }\n"
-               "  {\n"
-               "    { int b; }\n"
-               "  }\n"
-               "}");
-  verifyFormat("namespace n {\n"
-               "void foo() {\n"
-               "  {\n"
-               "    {\n"
-               "      statement();\n"
-               "      if (false) {\n"
-               "      }\n"
-               "    }\n"
-               "  }\n"
-               "  {}\n"
-               "}\n"
-               "} // namespace n");
-
   // Long lists should be formatted in columns even if they are nested.
   verifyFormat(
       "vector<int> x = function({1, 22, 333, 4444, 55555, 666666, 7777777,\n"
@@ -11936,8 +11984,7 @@ TEST_F(FormatTest, PullTrivialFunctionDefinitionsIntoSingleLine) {
                "};",
                getGoogleStyle());
 
-  FormatStyle NoColumnLimit = getLLVMStyle();
-  NoColumnLimit.ColumnLimit = 0;
+  FormatStyle NoColumnLimit = getLLVMStyleWithColumns(0);
   EXPECT_EQ("A() : b(0) {}", format("A():b(0){}", NoColumnLimit));
   EXPECT_EQ("class C {\n"
             "  A() : b(0) {}\n"
@@ -12096,12 +12143,11 @@ TEST_F(FormatTest, PullInlineOnlyFunctionDefinitionsIntoSingleLine) {
 }
 
 TEST_F(FormatTest, SplitEmptyFunction) {
-  FormatStyle Style = getLLVMStyle();
+  FormatStyle Style = getLLVMStyleWithColumns(40);
   Style.AllowShortFunctionsOnASingleLine = FormatStyle::SFS_None;
   Style.BreakBeforeBraces = FormatStyle::BS_Custom;
   Style.BraceWrapping.AfterFunction = true;
   Style.BraceWrapping.SplitEmptyFunction = false;
-  Style.ColumnLimit = 40;
 
   verifyFormat("int f()\n"
                "{}",
@@ -12162,6 +12208,37 @@ TEST_F(FormatTest, SplitEmptyFunction) {
                "}",
                Style);
 }
+
+TEST_F(FormatTest, SplitEmptyFunctionButNotRecord) {
+  FormatStyle Style = getLLVMStyleWithColumns(40);
+  Style.AllowShortFunctionsOnASingleLine = FormatStyle::SFS_None;
+  Style.BreakBeforeBraces = FormatStyle::BS_Custom;
+  Style.BraceWrapping.AfterFunction = true;
+  Style.BraceWrapping.SplitEmptyFunction = true;
+  Style.BraceWrapping.SplitEmptyRecord = false;
+
+  verifyFormat("class C {};", Style);
+  verifyFormat("struct C {};", Style);
+  verifyFormat("void f(int aaaaaaaaaaaaaaaaaaaaaaaaaaaa,\n"
+               "       int bbbbbbbbbbbbbbbbbbbbbbbb)\n"
+               "{\n"
+               "}",
+               Style);
+  verifyFormat("class C {\n"
+               "  C()\n"
+               "      : aaaaaaaaaaaaaaaaaaaaaaaaaaaa(),\n"
+               "        bbbbbbbbbbbbbbbbbbb()\n"
+               "  {\n"
+               "  }\n"
+               "  void\n"
+               "  m(int aaaaaaaaaaaaaaaaaaaaaaaaaaaa,\n"
+               "    int bbbbbbbbbbbbbbbbbbbbbbbb)\n"
+               "  {\n"
+               "  }\n"
+               "};",
+               Style);
+}
+
 TEST_F(FormatTest, KeepShortFunctionAfterPPElse) {
   FormatStyle Style = getLLVMStyle();
   Style.AllowShortFunctionsOnASingleLine = FormatStyle::SFS_All;
@@ -17321,14 +17398,13 @@ TEST_F(FormatTest, AllmanBraceBreaking) {
 }
 
 TEST_F(FormatTest, WhitesmithsBraceBreaking) {
-  FormatStyle WhitesmithsBraceStyle = getLLVMStyle();
+  FormatStyle WhitesmithsBraceStyle = getLLVMStyleWithColumns(0);
   WhitesmithsBraceStyle.BreakBeforeBraces = FormatStyle::BS_Whitesmiths;
 
   // Make a few changes to the style for testing purposes
   WhitesmithsBraceStyle.AllowShortFunctionsOnASingleLine =
       FormatStyle::SFS_Empty;
   WhitesmithsBraceStyle.AllowShortLambdasOnASingleLine = FormatStyle::SLS_None;
-  WhitesmithsBraceStyle.ColumnLimit = 0;
 
   // FIXME: this test case can't decide whether there should be a blank line
   // after the ~D() line or not. It adds one if one doesn't exist in the test
@@ -18317,8 +18393,7 @@ TEST_F(FormatTest, UnderstandPragmaOption) {
 }
 
 TEST_F(FormatTest, OptimizeBreakPenaltyVsExcess) {
-  FormatStyle Style = getLLVMStyle();
-  Style.ColumnLimit = 20;
+  FormatStyle Style = getLLVMStyleWithColumns(20);
 
   // See PR41213
   EXPECT_EQ("/*\n"
@@ -20775,8 +20850,7 @@ TEST_F(FormatTest, FormatsBlocks) {
 }
 
 TEST_F(FormatTest, FormatsBlocksWithZeroColumnWidth) {
-  FormatStyle ZeroColumn = getLLVMStyle();
-  ZeroColumn.ColumnLimit = 0;
+  FormatStyle ZeroColumn = getLLVMStyleWithColumns(0);
 
   verifyFormat("[[SessionService sharedService] "
                "loadWindowWithCompletionBlock:^(SessionWindow *window) {\n"
@@ -21082,6 +21156,16 @@ TEST_F(FormatTest, SpacesInAngles) {
   verifyFormat("A< A< int > >();", Spaces);
   verifyFormat("A<A<int > >();", Spaces);
   verifyFormat("A< A< int>>();", Spaces);
+
+  Spaces.SpacesInAngles = FormatStyle::SIAS_Always;
+  verifyFormat("// clang-format off\n"
+               "foo<<<1, 1>>>();\n"
+               "// clang-format on\n",
+               Spaces);
+  verifyFormat("// clang-format off\n"
+               "foo< < <1, 1> > >();\n"
+               "// clang-format on\n",
+               Spaces);
 }
 
 TEST_F(FormatTest, SpaceAfterTemplateKeyword) {
@@ -21390,8 +21474,8 @@ TEST(FormatStyle, GetStyleOfFile) {
   ASSERT_TRUE((bool)StyleTd);
   ASSERT_EQ(*StyleTd, getLLVMStyle(FormatStyle::LK_TableGen));
 
-  // Test 9.1: overwriting a file style, when parent no file exists with no
-  // fallback style
+  // Test 9.1.1: overwriting a file style, when no parent file exists with no
+  // fallback style.
   ASSERT_TRUE(FS.addFile(
       "/e/sub/.clang-format", 0,
       llvm::MemoryBuffer::getMemBuffer("BasedOnStyle: InheritParentConfig\n"
@@ -21403,6 +21487,25 @@ TEST(FormatStyle, GetStyleOfFile) {
   ASSERT_EQ(*Style9, [] {
     auto Style = getNoStyle();
     Style.ColumnLimit = 20;
+    return Style;
+  }());
+
+  // Test 9.1.2: propagate more than one level with no parent file.
+  ASSERT_TRUE(FS.addFile("/e/sub/sub/code.cpp", 0,
+                         llvm::MemoryBuffer::getMemBuffer("int i;")));
+  ASSERT_TRUE(FS.addFile("/e/sub/sub/.clang-format", 0,
+                         llvm::MemoryBuffer::getMemBuffer(
+                             "BasedOnStyle: InheritParentConfig\n"
+                             "WhitespaceSensitiveMacros: ['FOO', 'BAR']")));
+  std::vector<std::string> NonDefaultWhiteSpaceMacros{"FOO", "BAR"};
+
+  ASSERT_NE(Style9->WhitespaceSensitiveMacros, NonDefaultWhiteSpaceMacros);
+  Style9 = getStyle("file", "/e/sub/sub/code.cpp", "none", "", &FS);
+  ASSERT_TRUE(static_cast<bool>(Style9));
+  ASSERT_EQ(*Style9, [&NonDefaultWhiteSpaceMacros] {
+    auto Style = getNoStyle();
+    Style.ColumnLimit = 20;
+    Style.WhitespaceSensitiveMacros = NonDefaultWhiteSpaceMacros;
     return Style;
   }());
 
@@ -21429,15 +21532,7 @@ TEST(FormatStyle, GetStyleOfFile) {
     return Style;
   }());
 
-  // Test 9.4: propagate more than one level
-  ASSERT_TRUE(FS.addFile("/e/sub/sub/code.cpp", 0,
-                         llvm::MemoryBuffer::getMemBuffer("int i;")));
-  ASSERT_TRUE(FS.addFile("/e/sub/sub/.clang-format", 0,
-                         llvm::MemoryBuffer::getMemBuffer(
-                             "BasedOnStyle: InheritParentConfig\n"
-                             "WhitespaceSensitiveMacros: ['FOO', 'BAR']")));
-  std::vector<std::string> NonDefaultWhiteSpaceMacros{"FOO", "BAR"};
-
+  // Test 9.4: propagate more than one level with a parent file.
   const auto SubSubStyle = [&NonDefaultWhiteSpaceMacros] {
     auto Style = getGoogleStyle();
     Style.ColumnLimit = 20;
@@ -21494,6 +21589,70 @@ TEST(FormatStyle, GetStyleOfFile) {
     Style.IndentWidth = 7;
     return Style;
   }());
+
+  // Test 9.9: use inheritance from a specific config file.
+  Style9 = getStyle("file:/e/sub/sub/.clang-format", "/e/sub/sub/code.cpp",
+                    "none", "", &FS);
+  ASSERT_TRUE(static_cast<bool>(Style9));
+  ASSERT_EQ(*Style9, SubSubStyle);
+}
+
+TEST(FormatStyle, GetStyleOfSpecificFile) {
+  llvm::vfs::InMemoryFileSystem FS;
+  // Specify absolute path to a format file in a parent directory.
+  ASSERT_TRUE(
+      FS.addFile("/e/.clang-format", 0,
+                 llvm::MemoryBuffer::getMemBuffer("BasedOnStyle: LLVM")));
+  ASSERT_TRUE(
+      FS.addFile("/e/explicit.clang-format", 0,
+                 llvm::MemoryBuffer::getMemBuffer("BasedOnStyle: Google")));
+  ASSERT_TRUE(FS.addFile("/e/sub/sub/sub/test.cpp", 0,
+                         llvm::MemoryBuffer::getMemBuffer("int i;")));
+  auto Style = getStyle("file:/e/explicit.clang-format",
+                        "/e/sub/sub/sub/test.cpp", "LLVM", "", &FS);
+  ASSERT_TRUE(static_cast<bool>(Style));
+  ASSERT_EQ(*Style, getGoogleStyle());
+
+  // Specify relative path to a format file.
+  ASSERT_TRUE(
+      FS.addFile("../../e/explicit.clang-format", 0,
+                 llvm::MemoryBuffer::getMemBuffer("BasedOnStyle: Google")));
+  Style = getStyle("file:../../e/explicit.clang-format",
+                   "/e/sub/sub/sub/test.cpp", "LLVM", "", &FS);
+  ASSERT_TRUE(static_cast<bool>(Style));
+  ASSERT_EQ(*Style, getGoogleStyle());
+
+  // Specify path to a format file that does not exist.
+  Style = getStyle("file:/e/missing.clang-format", "/e/sub/sub/sub/test.cpp",
+                   "LLVM", "", &FS);
+  ASSERT_FALSE(static_cast<bool>(Style));
+  llvm::consumeError(Style.takeError());
+
+  // Specify path to a file on the filesystem.
+  SmallString<128> FormatFilePath;
+  std::error_code ECF = llvm::sys::fs::createTemporaryFile(
+      "FormatFileTest", "tpl", FormatFilePath);
+  EXPECT_FALSE((bool)ECF);
+  llvm::raw_fd_ostream FormatFileTest(FormatFilePath, ECF);
+  EXPECT_FALSE((bool)ECF);
+  FormatFileTest << "BasedOnStyle: Google\n";
+  FormatFileTest.close();
+
+  SmallString<128> TestFilePath;
+  std::error_code ECT =
+      llvm::sys::fs::createTemporaryFile("CodeFileTest", "cc", TestFilePath);
+  EXPECT_FALSE((bool)ECT);
+  llvm::raw_fd_ostream CodeFileTest(TestFilePath, ECT);
+  CodeFileTest << "int i;\n";
+  CodeFileTest.close();
+
+  std::string format_file_arg = std::string("file:") + FormatFilePath.c_str();
+  Style = getStyle(format_file_arg, TestFilePath, "LLVM", "", nullptr);
+
+  llvm::sys::fs::remove(FormatFilePath.c_str());
+  llvm::sys::fs::remove(TestFilePath.c_str());
+  ASSERT_TRUE(static_cast<bool>(Style));
+  ASSERT_EQ(*Style, getGoogleStyle());
 }
 
 TEST_F(ReplacementTest, FormatCodeAfterReplacements) {
@@ -21520,7 +21679,7 @@ TEST_F(ReplacementTest, FormatCodeAfterReplacements) {
        tooling::Replacement(Context.Sources, Context.getLocation(ID, 4, 13), 1,
                             "nullptr")});
 
-  format::FormatStyle Style = format::getLLVMStyle();
+  FormatStyle Style = getLLVMStyle();
   Style.ColumnLimit = 20; // Set column limit to 20 to increase readibility.
   auto FormattedReplaces = formatReplacements(Code, Replaces, Style);
   EXPECT_TRUE(static_cast<bool>(FormattedReplaces))
@@ -21549,7 +21708,7 @@ TEST_F(ReplacementTest, SortIncludesAfterReplacement) {
       {tooling::Replacement(Context.Sources, Context.getLocation(ID, 1, 1), 0,
                             "#include \"b.h\"\n")});
 
-  format::FormatStyle Style = format::getLLVMStyle();
+  FormatStyle Style = getLLVMStyle();
   Style.SortIncludes = FormatStyle::SI_CaseSensitive;
   auto FormattedReplaces = formatReplacements(Code, Replaces, Style);
   EXPECT_TRUE(static_cast<bool>(FormattedReplaces))
@@ -21568,7 +21727,7 @@ TEST_F(FormatTest, FormatSortsUsingDeclarations) {
 }
 
 TEST_F(FormatTest, UTF8CharacterLiteralCpp03) {
-  format::FormatStyle Style = format::getLLVMStyle();
+  FormatStyle Style = getLLVMStyle();
   Style.Standard = FormatStyle::LS_Cpp03;
   // cpp03 recognize this string as identifier u8 and literal character 'a'
   EXPECT_EQ("auto c = u8 'a';", format("auto c = u8'a';", Style));
@@ -21648,7 +21807,7 @@ TEST_F(FormatTest, StructuredBindings) {
   EXPECT_EQ("auto const &&[x, y]{expr};",
             format("auto  const  &&  [x,y]  {expr};"));
 
-  format::FormatStyle Spaces = format::getLLVMStyle();
+  FormatStyle Spaces = getLLVMStyle();
   Spaces.SpacesInSquareBrackets = true;
   verifyFormat("auto [ a, b ] = f();", Spaces);
   verifyFormat("auto &&[ a, b ] = f();", Spaces);
@@ -22176,8 +22335,7 @@ TEST_F(FormatTest, WhitespaceSensitiveMacros) {
 TEST_F(FormatTest, VeryLongNamespaceCommentSplit) {
   // These tests are not in NamespaceFixer because that doesn't
   // test its interaction with line wrapping
-  FormatStyle Style = getLLVMStyle();
-  Style.ColumnLimit = 80;
+  FormatStyle Style = getLLVMStyleWithColumns(80);
   verifyFormat("namespace {\n"
                "int i;\n"
                "int j;\n"
@@ -22884,8 +23042,7 @@ TEST_F(FormatTest, CoroutineCoAwait) {
   verifyFormat("co_await [this](int a, int b) -> Task { co_return co_await "
                "foo(); }(x, y);");
 
-  FormatStyle Style = getLLVMStyle();
-  Style.ColumnLimit = 40;
+  FormatStyle Style = getLLVMStyleWithColumns(40);
   verifyFormat("co_await [this](int a, int b) -> Task {\n"
                "  co_return co_await foo();\n"
                "}(x, y);",

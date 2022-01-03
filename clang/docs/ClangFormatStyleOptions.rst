@@ -32,6 +32,10 @@ try to find the ``.clang-format`` file located in the closest parent directory
 of the input file. When the standard input is used, the search is started from
 the current directory.
 
+When using ``-style=file:<format_file_path>``, :program:`clang-format` for
+each input file will use the format file located at `<format_file_path>`.
+The path may be absolute or relative to the working directory.
+
 The ``.clang-format`` file uses YAML format:
 
 .. code-block:: yaml
@@ -152,7 +156,7 @@ the configuration (without a prefix: ``Auto``).
     <https://chromium.googlesource.com/chromium/src/+/refs/heads/main/styleguide/styleguide.md>`_
   * ``Mozilla``
     A style complying with `Mozilla's style guide
-    <https://developer.mozilla.org/en-US/docs/Developer_Guide/Coding_Style>`_
+    <https://firefox-source-docs.mozilla.org/code-quality/coding-style/index.html>`_
   * ``WebKit``
     A style complying with `WebKit's style guide
     <https://www.webkit.org/coding/coding-style.html>`_
@@ -2457,7 +2461,7 @@ the configuration (without a prefix: ``Auto``).
         Priority:        2
         SortPriority:    2
         CaseSensitive:   true
-      - Regex:           '^(<|"(gtest|gmock|isl|json)/)'
+      - Regex:           '^((<|")(gtest|gmock|isl|json)/)'
         Priority:        3
       - Regex:           '<[[:alnum:].]+>'
         Priority:        4
@@ -3236,7 +3240,7 @@ the configuration (without a prefix: ``Auto``).
 **QualifierAlignment** (``QualifierAlignmentStyle``) :versionbadge:`clang-format 14`
   Different ways to arrange specifiers and qualifiers (e.g. const/volatile).
 
-  .. warning::
+  .. warning:: 
 
    Setting ``QualifierAlignment``  to something other than `Leave`, COULD
    lead to incorrect code formatting due to incorrect decisions made due to
