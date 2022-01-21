@@ -1,4 +1,4 @@
-//===- DynamicPass.cpp - Implementation of a dynamic configurable pass ----===//
+//===- LinalgStrategyPasses.cpp - Implementation of Linalg passes ---------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -52,8 +52,8 @@ struct LinalgStrategyTileAndFusePass
     this->anchorOpName.setValue(opName.str());
   }
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
@@ -88,19 +88,20 @@ struct LinalgStrategyTilePass
     this->anchorOpName.setValue(opName.str());
   }
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
-    RewritePatternSet tilingPattern(funcOp.getContext());
-    if (!anchorOpName.empty()) {
-      tilingPattern.add<LinalgGenericTilingPattern>(
-          anchorOpName, funcOp.getContext(), options, filter);
-    } else {
-      tilingPattern.add<LinalgGenericTilingPattern>(funcOp.getContext(), filter,
-                                                    options);
-    }
+    MLIRContext *ctx = funcOp.getContext();
+    RewritePatternSet tilingPattern(ctx);
+    if (!anchorOpName.empty())
+      tilingPattern.add<LinalgTilingPattern>(anchorOpName, ctx, options,
+                                             filter);
+    else
+      tilingPattern.add<LinalgTilingPattern>(ctx, options, filter);
+    if (anchorOpName == linalg::PadTensorOp::getOperationName())
+      populatePadTensorTilingPatterns(tilingPattern, options);
     (void)applyPatternsAndFoldGreedily(funcOp, std::move(tilingPattern));
   }
 
@@ -120,8 +121,8 @@ struct LinalgStrategyPadPass
     this->anchorOpName.setValue(opName.str());
   }
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
@@ -152,8 +153,8 @@ struct LinalgStrategyGeneralizePass
     this->anchorOpName.setValue(opName.str());
   }
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
@@ -183,8 +184,8 @@ struct LinalgStrategyDecomposePass
   LinalgStrategyDecomposePass(LinalgTransformationFilter filter)
       : filter(std::move(filter)) {}
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
     RewritePatternSet decompositionPattern(funcOp.getContext());
@@ -209,8 +210,8 @@ struct LinalgStrategyInterchangePass
                             iteratorInterchange.end()),
         filter(std::move(filter)) {}
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
@@ -240,8 +241,8 @@ struct LinalgStrategyPromotePass
     this->anchorOpName.setValue(opName.str());
   }
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
@@ -274,8 +275,8 @@ struct LinalgStrategyVectorizePass
     this->vectorizePadding.setValue(padVectorize);
   }
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
@@ -324,8 +325,8 @@ struct LinalgStrategyEnablePass
                            LinalgTransformationFilter filt)
       : options(opt), filter(std::move(filt)) {}
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
@@ -374,8 +375,8 @@ struct LinalgStrategyLowerVectorsPass
                                  LinalgTransformationFilter filt)
       : options(opt), filter(std::move(filt)) {}
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
 
@@ -435,8 +436,8 @@ struct LinalgStrategyRemoveMarkersPass
     : public LinalgStrategyRemoveMarkersPassBase<
           LinalgStrategyRemoveMarkersPass> {
 
-  void runOnFunction() override {
-    auto funcOp = getFunction();
+  void runOnOperation() override {
+    auto funcOp = getOperation();
     if (!anchorFuncName.empty() && funcOp.getName() != anchorFuncName)
       return;
     funcOp.walk([](LinalgOp op) {

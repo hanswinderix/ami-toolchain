@@ -204,7 +204,7 @@ struct PPCOperand : public MCParsedAsmOperand {
   PPCOperand(KindTy K) : Kind(K) {}
 
 public:
-  PPCOperand(const PPCOperand &o) {
+  PPCOperand(const PPCOperand &o) : MCParsedAsmOperand() {
     Kind = o.Kind;
     StartLoc = o.StartLoc;
     EndLoc = o.EndLoc;

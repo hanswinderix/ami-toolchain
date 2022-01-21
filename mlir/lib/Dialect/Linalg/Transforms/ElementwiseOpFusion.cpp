@@ -172,7 +172,7 @@ generateFusedElementwiseOpRegion(PatternRewriter &rewriter, GenericOp fusedOp,
   // 3. Consumer input operands up to consumerIdx (exclusive).
   for (BlockArgument bbArg : consumerBlock.getArguments().take_front(
            consumerOpOperand->getOperandNumber())) // input assumption.
-    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType()));
+    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType(), bbArg.getLoc()));
 
   // Replacing consumerIdx requires getting the cloned, yielded, value from
   // the (cloned) producer block. This happens in step 9.
@@ -180,7 +180,7 @@ generateFusedElementwiseOpRegion(PatternRewriter &rewriter, GenericOp fusedOp,
   // 4. Splice in producer's input operands.
   for (BlockArgument bbArg :
        producerBlock.getArguments().take_front(producer.getNumInputs()))
-    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType()));
+    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType(), bbArg.getLoc()));
 
   // 4.b. Producer output operand/map that is fused needs to be mapped to the
   // producer bbArg if it is an "initTensor" (i.e. its value is actually read).
@@ -190,18 +190,18 @@ generateFusedElementwiseOpRegion(PatternRewriter &rewriter, GenericOp fusedOp,
                               .drop_front(producer.getNumInputs())
                               // TODO: bbArg index of
                               .front();
-    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType()));
+    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType(), bbArg.getLoc()));
   }
   // 5. Remaining consumer's input operands (drop past index `consumerIdx`).
   for (BlockArgument bbArg :
        consumerBlock.getArguments()
            .take_front(consumer.getNumInputs())
            .drop_front(consumerOpOperand->getOperandNumber() + 1))
-    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType()));
+    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType(), bbArg.getLoc()));
   // 6. All of consumer's output operands.
   for (BlockArgument bbArg :
        consumerBlock.getArguments().take_back(consumer.getNumOutputs()))
-    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType()));
+    mapper.map(bbArg, fusedBlock->addArgument(bbArg.getType(), bbArg.getLoc()));
   // 7. All of producer's output operands except the one fused.
   // TODO: allow fusion of multi-result producers.
   assert(producer->getNumResults() == 1 && "expected single result producer");
@@ -318,6 +318,13 @@ fuseElementwiseOpsImpl(GenericOp producer, OpOperand *consumerOpOperand,
       consumer.iterator_types(),
       /*doc=*/nullptr,
       /*library_call=*/nullptr);
+  if (!fusedOp.getShapesToLoopsMap()) {
+    // Fused op has invalid indexing maps. Typically this means something is off
+    // in the input, but going ahead here would result in verification errors.
+    // So cleanup and abort.
+    rewriter.eraseOp(fusedOp);
+    return llvm::None;
+  }
 
   // Construct an AffineMap from consumer loops to producer loops.
   // consumer loop -> tensor index
@@ -524,6 +531,7 @@ public:
   LogicalResult compute(LinalgOp linalgOp, OpOperand *fusableOpOperand,
                         ArrayRef<AffineMap> reassociationMaps,
                         ArrayRef<int64_t> expandedShape,
+                        ArrayRef<int64_t> collapsedShape,
                         PatternRewriter &rewriter);
   unsigned getOrigOpNumDims() const { return reassociation.size(); }
   unsigned getExpandedOpNumDims() const { return expandedOpNumDims; }
@@ -533,6 +541,7 @@ public:
   ArrayRef<int64_t> getExpandedShapeOfDim(unsigned i) const {
     return expandedShapeMap[i];
   }
+  ArrayRef<int64_t> getOriginalShape() const { return originalLoopExtent; }
 
 private:
   /// Reassociation from the dimensions in the original operation to the
@@ -541,6 +550,8 @@ private:
   /// Mapping from extent of loops in the original operation, to the extent of
   /// loops in the expanded operation.
   SmallVector<SmallVector<int64_t>> expandedShapeMap;
+  /// Extent of the loop in the original operation.
+  SmallVector<int64_t> originalLoopExtent;
   unsigned expandedOpNumDims;
 };
 } // namespace
@@ -549,6 +560,7 @@ LogicalResult ExpansionInfo::compute(LinalgOp linalgOp,
                                      OpOperand *fusableOpOperand,
                                      ArrayRef<AffineMap> reassociationMaps,
                                      ArrayRef<int64_t> expandedShape,
+                                     ArrayRef<int64_t> collapsedShape,
                                      PatternRewriter &rewriter) {
   if (reassociationMaps.empty())
     return failure();
@@ -558,6 +570,8 @@ LogicalResult ExpansionInfo::compute(LinalgOp linalgOp,
       linalgOp.getStaticLoopRanges();
   if (!originalLoopRange)
     return rewriter.notifyMatchFailure(linalgOp, "unable to find loop range");
+  originalLoopExtent.assign(originalLoopRange->begin(),
+                            originalLoopRange->end());
 
   reassociation.clear();
   expandedShapeMap.clear();
@@ -576,7 +590,7 @@ LogicalResult ExpansionInfo::compute(LinalgOp linalgOp,
   // The remaining dimensions remain the same.
   for (unsigned i : llvm::seq<unsigned>(0, fusedIndexMap.getNumDims()))
     if (expandedShapeMap[i].empty())
-      expandedShapeMap[i] = {(*originalLoopRange)[i]};
+      expandedShapeMap[i] = {originalLoopExtent[i]};
 
   // Compute reassociation map from the original op to the expanded op.
   unsigned sum = 0;
@@ -731,13 +745,16 @@ fuseWithReshapeByExpansion(GenericOp genericOp, Operation *reshapeOp,
   RankedTensorType expandedType = isExpanding
                                       ? expandingReshapeOp.getResultType()
                                       : collapsingReshapeOp.getSrcType();
+  RankedTensorType collapsedType = isExpanding
+                                       ? expandingReshapeOp.getSrcType()
+                                       : collapsingReshapeOp.getResultType();
 
   ExpansionInfo expansionInfo;
   if (failed(expansionInfo.compute(
           genericOp, fusableOpOperand,
           isExpanding ? expandingReshapeOp.getReassociationMaps()
                       : collapsingReshapeOp.getReassociationMaps(),
-          expandedType.getShape(), rewriter)))
+          expandedType.getShape(), collapsedType.getShape(), rewriter)))
     return llvm::None;
 
   if (failed(isGenericOpExpandable(genericOp, expansionInfo, rewriter)))
@@ -758,13 +775,21 @@ fuseWithReshapeByExpansion(GenericOp genericOp, Operation *reshapeOp,
     }
     if (genericOp.isInputTensor(opOperand)) {
       AffineMap indexingMap = genericOp.getTiedIndexingMap(opOperand);
+      auto opOperandType = opOperand->get().getType().cast<RankedTensorType>();
       RankedTensorType expandedOperandType =
-          getExpandedType(opOperand->get().getType().cast<RankedTensorType>(),
-                          indexingMap, expansionInfo);
+          getExpandedType(opOperandType, indexingMap, expansionInfo);
       if (expandedOperandType != opOperand->get().getType()) {
         // Reshape the operand to get the right type.
         SmallVector<ReassociationIndices> reassociation =
             getReassociationForExpansion(indexingMap, expansionInfo);
+        if (failed(reshapeLikeShapesAreCompatible(
+                [&](const Twine &msg) {
+                  return rewriter.notifyMatchFailure(genericOp, msg);
+                },
+                opOperandType.getShape(), expandedOperandType.getShape(),
+                reassociation,
+                /*isExpandingReshape=*/true)))
+          return llvm::None;
         expandedOpOperands.push_back(rewriter.create<tensor::ExpandShapeOp>(
             genericOp.getLoc(), expandedOperandType, opOperand->get(),
             reassociation));
@@ -778,12 +803,20 @@ fuseWithReshapeByExpansion(GenericOp genericOp, Operation *reshapeOp,
   SmallVector<Value> outputs;
   for (OpOperand *opOperand : genericOp.getOutputOperands()) {
     AffineMap indexingMap = genericOp.getTiedIndexingMap(opOperand);
+    auto opOperandType = opOperand->get().getType().cast<RankedTensorType>();
     RankedTensorType expandedOutputType =
-        getExpandedType(opOperand->get().getType().cast<RankedTensorType>(),
-                        indexingMap, expansionInfo);
+        getExpandedType(opOperandType, indexingMap, expansionInfo);
     if (expandedOutputType != opOperand->get().getType()) {
       SmallVector<ReassociationIndices> reassociation =
           getReassociationForExpansion(indexingMap, expansionInfo);
+      if (failed(reshapeLikeShapesAreCompatible(
+              [&](const Twine &msg) {
+                return rewriter.notifyMatchFailure(genericOp, msg);
+              },
+              opOperandType.getShape(), expandedOutputType.getShape(),
+              reassociation,
+              /*isExpandingReshape=*/true)))
+        return llvm::None;
       outputs.push_back(rewriter.create<tensor::ExpandShapeOp>(
           genericOp.getLoc(), expandedOutputType, opOperand->get(),
           reassociation));

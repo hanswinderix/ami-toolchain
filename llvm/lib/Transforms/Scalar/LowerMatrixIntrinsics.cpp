@@ -1391,7 +1391,8 @@ public:
     // reloads necessary.
     unsigned Op0Regs = (R + VF - 1) / VF * M;
     unsigned Op1Regs = (M + VF - 1) / VF * C;
-    return Op0Regs + Op1Regs > TTI.getNumberOfRegisters(true);
+    return Op0Regs + Op1Regs >
+           TTI.getNumberOfRegisters(TTI.getRegisterClassForType(true));
   }
 
   MatrixTy getZeroMatrix(Type *EltType, unsigned R, unsigned C) {
@@ -1893,7 +1894,7 @@ public:
           write(Name);
           return;
         }
-        IntrinsicInst *II = dyn_cast<IntrinsicInst>(CI);
+        auto *II = cast<IntrinsicInst>(CI);
         write(Intrinsic::getBaseName(II->getIntrinsicID())
                   .drop_front(StringRef("llvm.matrix.").size()));
         write(".");
