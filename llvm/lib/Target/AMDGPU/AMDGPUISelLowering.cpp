@@ -19,6 +19,7 @@
 #include "GCNSubtarget.h"
 #include "SIMachineFunctionInfo.h"
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/Support/CommandLine.h"
@@ -360,6 +361,8 @@ AMDGPUTargetLowering::AMDGPUTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::CONCAT_VECTORS, MVT::v8f32, Custom);
   setOperationAction(ISD::EXTRACT_SUBVECTOR, MVT::v2f16, Custom);
   setOperationAction(ISD::EXTRACT_SUBVECTOR, MVT::v2i16, Custom);
+  setOperationAction(ISD::EXTRACT_SUBVECTOR, MVT::v4f16, Custom);
+  setOperationAction(ISD::EXTRACT_SUBVECTOR, MVT::v4i16, Custom);
   setOperationAction(ISD::EXTRACT_SUBVECTOR, MVT::v2f32, Custom);
   setOperationAction(ISD::EXTRACT_SUBVECTOR, MVT::v2i32, Custom);
   setOperationAction(ISD::EXTRACT_SUBVECTOR, MVT::v3f32, Custom);
@@ -588,26 +591,16 @@ AMDGPUTargetLowering::AMDGPUTargetLowering(const TargetMachine &TM,
   if (AMDGPUBypassSlowDiv)
     addBypassSlowDiv(64, 32);
 
-  setTargetDAGCombine(ISD::BITCAST);
-  setTargetDAGCombine(ISD::SHL);
-  setTargetDAGCombine(ISD::SRA);
-  setTargetDAGCombine(ISD::SRL);
-  setTargetDAGCombine(ISD::TRUNCATE);
-  setTargetDAGCombine(ISD::MUL);
-  setTargetDAGCombine(ISD::SMUL_LOHI);
-  setTargetDAGCombine(ISD::UMUL_LOHI);
-  setTargetDAGCombine(ISD::MULHU);
-  setTargetDAGCombine(ISD::MULHS);
-  setTargetDAGCombine(ISD::SELECT);
-  setTargetDAGCombine(ISD::SELECT_CC);
-  setTargetDAGCombine(ISD::STORE);
-  setTargetDAGCombine(ISD::FADD);
-  setTargetDAGCombine(ISD::FSUB);
-  setTargetDAGCombine(ISD::FNEG);
-  setTargetDAGCombine(ISD::FABS);
-  setTargetDAGCombine(ISD::AssertZext);
-  setTargetDAGCombine(ISD::AssertSext);
-  setTargetDAGCombine(ISD::INTRINSIC_WO_CHAIN);
+  setTargetDAGCombine({ISD::BITCAST,    ISD::SHL,
+                       ISD::SRA,        ISD::SRL,
+                       ISD::TRUNCATE,   ISD::MUL,
+                       ISD::SMUL_LOHI,  ISD::UMUL_LOHI,
+                       ISD::MULHU,      ISD::MULHS,
+                       ISD::SELECT,     ISD::SELECT_CC,
+                       ISD::STORE,      ISD::FADD,
+                       ISD::FSUB,       ISD::FNEG,
+                       ISD::FABS,       ISD::AssertZext,
+                       ISD::AssertSext, ISD::INTRINSIC_WO_CHAIN});
 }
 
 bool AMDGPUTargetLowering::mayIgnoreSignedZero(SDValue Op) const {
@@ -853,6 +846,8 @@ bool AMDGPUTargetLowering::isSDNodeAlwaysUniform(const SDNode *N) const {
         AMDGPUAS::CONSTANT_ADDRESS_32BIT)
       return true;
     return false;
+  case AMDGPUISD::SETCC: // ballot-style instruction
+    return true;
   }
   return false;
 }
@@ -1406,6 +1401,11 @@ SDValue AMDGPUTargetLowering::LowerEXTRACT_SUBVECTOR(SDValue Op,
   if (((SrcVT == MVT::v4f16 && VT == MVT::v2f16) ||
        (SrcVT == MVT::v4i16 && VT == MVT::v2i16)) &&
       Start != 1)
+    return Op;
+
+  if (((SrcVT == MVT::v8f16 && VT == MVT::v4f16) ||
+       (SrcVT == MVT::v8i16 && VT == MVT::v4i16)) &&
+      (Start == 0 || Start == 4))
     return Op;
 
   DAG.ExtractVectorElements(Op.getOperand(0), Args, Start,
@@ -2996,12 +2996,11 @@ SDValue AMDGPUTargetLowering::performLoadCombine(SDNode *N,
     // the bytes again are not eliminated in the case of an unaligned copy.
     if (!allowsMisalignedMemoryAccesses(
             VT, AS, Alignment, LN->getMemOperand()->getFlags(), &IsFast)) {
-      SDValue Ops[2];
-
       if (VT.isVector())
-        std::tie(Ops[0], Ops[1]) = scalarizeVectorLoad(LN, DAG);
-      else
-        std::tie(Ops[0], Ops[1]) = expandUnalignedLoad(LN, DAG);
+        return SplitVectorLoad(SDValue(LN, 0), DAG);
+
+      SDValue Ops[2];
+      std::tie(Ops[0], Ops[1]) = expandUnalignedLoad(LN, DAG);
 
       return DAG.getMergeValues(Ops, SDLoc(N));
     }
@@ -3052,7 +3051,7 @@ SDValue AMDGPUTargetLowering::performStoreCombine(SDNode *N,
     if (!allowsMisalignedMemoryAccesses(
             VT, AS, Alignment, SN->getMemOperand()->getFlags(), &IsFast)) {
       if (VT.isVector())
-        return scalarizeVectorStore(SN, DAG);
+        return SplitVectorStore(SDValue(SN, 0), DAG);
 
       return expandUnalignedStore(SN, DAG);
     }
@@ -3274,8 +3273,9 @@ SDValue AMDGPUTargetLowering::performSrlCombine(SDNode *N,
   // this improves the ability to match BFE patterns in isel.
   if (LHS.getOpcode() == ISD::AND) {
     if (auto *Mask = dyn_cast<ConstantSDNode>(LHS.getOperand(1))) {
-      if (Mask->getAPIntValue().isShiftedMask() &&
-          Mask->getAPIntValue().countTrailingZeros() == ShiftAmt) {
+      unsigned MaskIdx, MaskLen;
+      if (Mask->getAPIntValue().isShiftedMask(MaskIdx, MaskLen) &&
+          MaskIdx == ShiftAmt) {
         return DAG.getNode(
             ISD::AND, SL, VT,
             DAG.getNode(ISD::SRL, SL, VT, LHS.getOperand(0), N->getOperand(1)),
@@ -4373,10 +4373,14 @@ uint32_t AMDGPUTargetLowering::getImplicitParameterOffset(
   uint64_t ArgOffset = alignTo(MFI->getExplicitKernArgSize(), Alignment) +
                        ExplicitArgOffset;
   switch (Param) {
-  case GRID_DIM:
+  case FIRST_IMPLICIT:
     return ArgOffset;
-  case GRID_OFFSET:
-    return ArgOffset + 4;
+  case PRIVATE_BASE:
+    return ArgOffset + AMDGPU::ImplicitArg::PRIVATE_BASE_OFFSET;
+  case SHARED_BASE:
+    return ArgOffset + AMDGPU::ImplicitArg::SHARED_BASE_OFFSET;
+  case QUEUE_PTR:
+    return ArgOffset + AMDGPU::ImplicitArg::QUEUE_PTR_OFFSET;
   }
   llvm_unreachable("unexpected implicit parameter type");
 }
@@ -4398,7 +4402,6 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(TC_RETURN)
   NODE_NAME_CASE(TRAP)
   NODE_NAME_CASE(RET_FLAG)
-  NODE_NAME_CASE(RET_GFX_FLAG)
   NODE_NAME_CASE(RETURN_TO_EPILOG)
   NODE_NAME_CASE(ENDPGM)
   NODE_NAME_CASE(DWORDADDR)
@@ -4478,6 +4481,8 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(CONST_DATA_PTR)
   NODE_NAME_CASE(PC_ADD_REL_OFFSET)
   NODE_NAME_CASE(LDS)
+  NODE_NAME_CASE(FPTRUNC_ROUND_UPWARD)
+  NODE_NAME_CASE(FPTRUNC_ROUND_DOWNWARD)
   NODE_NAME_CASE(DUMMY_CHAIN)
   case AMDGPUISD::FIRST_MEM_OPCODE_NUMBER: break;
   NODE_NAME_CASE(LOAD_D16_HI)
@@ -4571,6 +4576,19 @@ SDValue AMDGPUTargetLowering::getRecipEstimate(SDValue Operand,
   // clear on its precision.
 
   return SDValue();
+}
+
+static unsigned workitemIntrinsicDim(unsigned ID) {
+  switch (ID) {
+  case Intrinsic::amdgcn_workitem_id_x:
+    return 0;
+  case Intrinsic::amdgcn_workitem_id_y:
+    return 1;
+  case Intrinsic::amdgcn_workitem_id_z:
+    return 2;
+  default:
+    llvm_unreachable("not a workitem intrinsic");
+  }
 }
 
 void AMDGPUTargetLowering::computeKnownBitsForTargetNode(
@@ -4707,6 +4725,14 @@ void AMDGPUTargetLowering::computeKnownBitsForTargetNode(
       // These return at most the wavefront size - 1.
       unsigned Size = Op.getValueType().getSizeInBits();
       Known.Zero.setHighBits(Size - ST.getWavefrontSizeLog2());
+      break;
+    }
+    case Intrinsic::amdgcn_workitem_id_x:
+    case Intrinsic::amdgcn_workitem_id_y:
+    case Intrinsic::amdgcn_workitem_id_z: {
+      unsigned MaxValue = Subtarget->getMaxWorkitemID(
+          DAG.getMachineFunction().getFunction(), workitemIntrinsicDim(IID));
+      Known.Zero.setHighBits(countLeadingZeros(MaxValue));
       break;
     }
     default:

@@ -12,7 +12,6 @@
 #include "mlir/Dialect/Quant/QuantOps.h"
 #include "mlir/Dialect/Quant/QuantizeUtils.h"
 #include "mlir/Dialect/Quant/UniformSupport.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -99,6 +98,7 @@ void ConvertConstPass::runOnOperation() {
   (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
 }
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::quant::createConvertConstPass() {
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::quant::createConvertConstPass() {
   return std::make_unique<ConvertConstPass>();
 }

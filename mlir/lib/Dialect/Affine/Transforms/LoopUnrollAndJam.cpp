@@ -37,12 +37,12 @@
 #include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/Analysis/LoopAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Affine/Passes.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/Transforms/LoopUtils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/CommandLine.h"
 
@@ -63,7 +63,7 @@ struct LoopUnrollAndJam : public AffineLoopUnrollAndJamBase<LoopUnrollAndJam> {
 };
 } // namespace
 
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLoopUnrollAndJamPass(int unrollJamFactor) {
   return std::make_unique<LoopUnrollAndJam>(
       unrollJamFactor == -1 ? None : Optional<unsigned>(unrollJamFactor));

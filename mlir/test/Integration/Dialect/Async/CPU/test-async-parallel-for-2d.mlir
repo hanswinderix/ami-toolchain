@@ -4,9 +4,9 @@
 // RUN:               -async-runtime-ref-counting-opt                          \
 // RUN:               -arith-expand                                            \
 // RUN:               -convert-async-to-llvm                                   \
-// RUN:               -convert-scf-to-std                                      \
+// RUN:               -convert-scf-to-cf                                      \
 // RUN:               -convert-memref-to-llvm                                  \
-// RUN:               -convert-std-to-llvm                                     \
+// RUN:               -convert-func-to-llvm                                     \
 // RUN:               -reconcile-unrealized-casts                              \
 // RUN: | mlir-cpu-runner                                                      \
 // RUN:  -e entry -entry-point-result=void -O0                                 \
@@ -19,9 +19,9 @@
 // RUN:               -async-runtime-policy-based-ref-counting                 \
 // RUN:               -arith-expand                                            \
 // RUN:               -convert-async-to-llvm                                   \
-// RUN:               -convert-scf-to-std                                      \
+// RUN:               -convert-scf-to-cf                                      \
 // RUN:               -convert-memref-to-llvm                                  \
-// RUN:               -convert-std-to-llvm                                     \
+// RUN:               -convert-func-to-llvm                                     \
 // RUN:               -reconcile-unrealized-casts                              \
 // RUN: | mlir-cpu-runner                                                      \
 // RUN:  -e entry -entry-point-result=void -O0                                 \
@@ -37,9 +37,9 @@
 // RUN:               -async-runtime-ref-counting-opt                          \
 // RUN:               -arith-expand                                            \
 // RUN:               -convert-async-to-llvm                                   \
-// RUN:               -convert-scf-to-std                                      \
+// RUN:               -convert-scf-to-cf                                      \
 // RUN:               -convert-memref-to-llvm                                  \
-// RUN:               -convert-std-to-llvm                                     \
+// RUN:               -convert-func-to-llvm                                     \
 // RUN:               -reconcile-unrealized-casts                              \
 // RUN: | mlir-cpu-runner                                                      \
 // RUN:  -e entry -entry-point-result=void -O0                                 \
@@ -47,7 +47,7 @@
 // RUN:  -shared-libs=%mlir_integration_test_dir/libmlir_async_runtime%shlibext\
 // RUN: | FileCheck %s --dump-input=always
 
-func @entry() {
+func.func @entry() {
   %c0 = arith.constant 0.0 : f32
   %c1 = arith.constant 1 : index
   %c2 = arith.constant 2 : index
@@ -141,4 +141,4 @@ func @entry() {
   return
 }
 
-func private @print_memref_f32(memref<*xf32>) attributes { llvm.emit_c_interface }
+func.func private @print_memref_f32(memref<*xf32>) attributes { llvm.emit_c_interface }

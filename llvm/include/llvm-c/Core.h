@@ -18,6 +18,7 @@
 #include "llvm-c/Deprecated.h"
 #include "llvm-c/ErrorHandling.h"
 #include "llvm-c/ExternC.h"
+
 #include "llvm-c/Types.h"
 
 LLVM_C_EXTERN_C_BEGIN
@@ -1390,9 +1391,9 @@ LLVMBool LLVMIsLiteralStruct(LLVMTypeRef StructTy);
  */
 
 /**
- * Obtain the type of elements within a sequential type.
+ * Obtain the element type of an array or vector type.
  *
- * This works on array, vector, and pointer types.
+ * This currently also works for pointer types, but this usage is deprecated.
  *
  * @see llvm::SequentialType::getElementType()
  */
@@ -3977,6 +3978,9 @@ LLVMValueRef LLVMBuildFPCast(LLVMBuilderRef, LLVMValueRef Val,
 LLVMValueRef LLVMBuildIntCast(LLVMBuilderRef, LLVMValueRef Val, /*Signed cast!*/
                               LLVMTypeRef DestTy, const char *Name);
 
+LLVMOpcode LLVMGetCastOpcode(LLVMValueRef Src, LLVMBool SrcIsSigned,
+                             LLVMTypeRef DestTy, LLVMBool DestIsSigned);
+
 /* Comparisons */
 LLVMValueRef LLVMBuildICmp(LLVMBuilderRef, LLVMIntPredicate Op,
                            LLVMValueRef LHS, LLVMValueRef RHS,
@@ -4020,8 +4024,13 @@ LLVMValueRef LLVMBuildIsNull(LLVMBuilderRef, LLVMValueRef Val,
                              const char *Name);
 LLVMValueRef LLVMBuildIsNotNull(LLVMBuilderRef, LLVMValueRef Val,
                                 const char *Name);
-LLVMValueRef LLVMBuildPtrDiff(LLVMBuilderRef, LLVMValueRef LHS,
-                              LLVMValueRef RHS, const char *Name);
+LLVM_ATTRIBUTE_C_DEPRECATED(
+    LLVMValueRef LLVMBuildPtrDiff(LLVMBuilderRef, LLVMValueRef LHS,
+                                  LLVMValueRef RHS, const char *Name),
+    "Use LLVMBuildPtrDiff2 instead to support opaque pointers");
+LLVMValueRef LLVMBuildPtrDiff2(LLVMBuilderRef, LLVMTypeRef ElemTy,
+                               LLVMValueRef LHS, LLVMValueRef RHS,
+                               const char *Name);
 LLVMValueRef LLVMBuildFence(LLVMBuilderRef B, LLVMAtomicOrdering ordering,
                             LLVMBool singleThread, const char *Name);
 LLVMValueRef LLVMBuildAtomicRMW(LLVMBuilderRef B, LLVMAtomicRMWBinOp op,

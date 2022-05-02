@@ -13,22 +13,23 @@
 
 #include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "mlir/Transforms/LoopUtils.h"
 #include "mlir/Transforms/Passes.h"
 
 #define PASS_NAME "test-affine-data-copy"
 
 using namespace mlir;
 
-static llvm::cl::OptionCategory clOptionsCategory(PASS_NAME " options");
-
 namespace {
 
 struct TestAffineDataCopy
-    : public PassWrapper<TestAffineDataCopy, OperationPass<FuncOp>> {
+    : public PassWrapper<TestAffineDataCopy, OperationPass<func::FuncOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestAffineDataCopy)
+
   StringRef getArgument() const final { return PASS_NAME; }
   StringRef getDescription() const final {
     return "Tests affine data copy utility functions.";

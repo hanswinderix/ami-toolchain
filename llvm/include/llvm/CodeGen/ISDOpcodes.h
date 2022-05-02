@@ -294,7 +294,7 @@ enum NodeType {
   /// subtraction. These nodes take three operands: The first two are normal lhs
   /// and rhs to the add or sub, and the third is a boolean indicating if there
   /// is an incoming carry. They produce two results: the normal result of the
-  /// add or sub, and a boolean that indicates if an overflow occured (*not*
+  /// add or sub, and a boolean that indicates if an overflow occurred (*not*
   /// flag, because it may be a store to memory, etc.). If the type of the
   /// boolean is not i1 then the high bits conform to getBooleanContents.
   SADDO_CARRY,
@@ -462,6 +462,9 @@ enum NodeType {
   STRICT_FSETCC,
   STRICT_FSETCCS,
 
+  // FPTRUNC_ROUND - This corresponds to the fptrunc_round intrinsic.
+  FPTRUNC_ROUND,
+
   /// FMA - Perform a * b + c with no intermediate rounding step.
   FMA,
 
@@ -481,6 +484,13 @@ enum NodeType {
 
   /// Returns platform specific canonical encoding of a floating point number.
   FCANONICALIZE,
+
+  /// Performs a check of floating point class property, defined by IEEE-754.
+  /// The first operand is the floating point value to check. The second operand
+  /// specifies the checked property and is a TargetConstant which specifies
+  /// test in the same way as intrinsic 'is_fpclass'.
+  /// Returns boolean value.
+  IS_FPCLASS,
 
   /// BUILD_VECTOR(ELT0, ELT1, ELT2, ELT3,...) - Return a fixed-width vector
   /// with the specified, possibly variable, elements. The types of the
@@ -613,6 +623,17 @@ enum NodeType {
   /// part.
   MULHU,
   MULHS,
+
+  /// AVGFLOORS/AVGFLOORU - Averaging add - Add two integers using an integer of
+  /// type i[N+1], halving the result by shifting it one bit right.
+  /// shr(add(ext(X), ext(Y)), 1)
+  AVGFLOORS,
+  AVGFLOORU,
+  /// AVGCEILS/AVGCEILU - Rounding averaging add - Add two integers using an
+  /// integer of type i[N+2], add 1 and halve the result by shifting it one bit
+  /// right. shr(add(ext(X), ext(Y), 1), 1)
+  AVGCEILS,
+  AVGCEILU,
 
   // ABDS/ABDU - Absolute difference - Return the absolute difference between
   // two numbers interpreted as signed/unsigned.

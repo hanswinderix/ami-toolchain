@@ -13,7 +13,6 @@
 #include "llvm/IR/Metadata.h"
 #include "LLVMContextImpl.h"
 #include "MetadataImpl.h"
-#include "SymbolTableListTraitsImpl.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -44,7 +43,6 @@
 #include "llvm/IR/TrackingMDRef.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Value.h"
-#include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -52,8 +50,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -247,6 +243,36 @@ void ReplaceableMetadataImpl::moveRef(void *Ref, void *New,
          "Reference without owner must be direct");
   assert((OwnerAndIndex.first || *static_cast<Metadata **>(New) == &MD) &&
          "Reference without owner must be direct");
+}
+
+void ReplaceableMetadataImpl::SalvageDebugInfo(const Constant &C) {
+  if (!C.isUsedByMetadata()) {
+    return;
+  }
+
+  LLVMContext &Context = C.getType()->getContext();
+  auto &Store = Context.pImpl->ValuesAsMetadata;
+  auto I = Store.find(&C);
+  ValueAsMetadata *MD = I->second;
+  using UseTy =
+      std::pair<void *, std::pair<MetadataTracking::OwnerTy, uint64_t>>;
+  // Copy out uses and update value of Constant used by debug info metadata with undef below
+  SmallVector<UseTy, 8> Uses(MD->UseMap.begin(), MD->UseMap.end());
+
+  for (const auto &Pair : Uses) {
+    MetadataTracking::OwnerTy Owner = Pair.second.first;
+    if (!Owner)
+      continue;
+    if (!Owner.is<Metadata *>())
+      continue;
+    auto *OwnerMD = dyn_cast<MDNode>(Owner.get<Metadata *>());
+    if (!OwnerMD)
+      continue;
+    if (isa<DINode>(OwnerMD)) {
+      OwnerMD->handleChangedOperand(
+          Pair.first, ValueAsMetadata::get(UndefValue::get(C.getType())));
+    }
+  }
 }
 
 void ReplaceableMetadataImpl::replaceAllUsesWith(Metadata *MD) {

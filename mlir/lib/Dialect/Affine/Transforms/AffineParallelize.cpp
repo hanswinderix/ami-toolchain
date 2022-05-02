@@ -18,10 +18,10 @@
 #include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/IR/AffineValueMap.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Affine/Passes.h"
 #include "mlir/Dialect/Affine/Passes.h.inc"
 #include "mlir/Dialect/Affine/Utils.h"
-#include "mlir/Transforms/LoopUtils.h"
 #include "llvm/Support/Debug.h"
 #include <deque>
 
@@ -48,7 +48,7 @@ struct ParallelizationCandidate {
 } // namespace
 
 void AffineParallelize::runOnOperation() {
-  FuncOp f = getOperation();
+  func::FuncOp f = getOperation();
 
   // The walker proceeds in pre-order to process the outer loops first
   // and control the number of outer parallel loops.
@@ -81,6 +81,7 @@ void AffineParallelize::runOnOperation() {
   }
 }
 
-std::unique_ptr<OperationPass<FuncOp>> mlir::createAffineParallelizePass() {
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::createAffineParallelizePass() {
   return std::make_unique<AffineParallelize>();
 }

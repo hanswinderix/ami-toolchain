@@ -234,7 +234,7 @@ Error EPCIndirectStubsManager::updatePointer(StringRef Name,
 namespace llvm {
 namespace orc {
 
-EPCIndirectionUtils::ABISupport::~ABISupport() {}
+EPCIndirectionUtils::ABISupport::~ABISupport() = default;
 
 Expected<std::unique_ptr<EPCIndirectionUtils>>
 EPCIndirectionUtils::Create(ExecutorProcessControl &EPC) {
@@ -260,6 +260,9 @@ EPCIndirectionUtils::Create(ExecutorProcessControl &EPC) {
   case Triple::mips64:
   case Triple::mips64el:
     return CreateWithABI<OrcMips64>(EPC);
+
+  case Triple::riscv64:
+    return CreateWithABI<OrcRiscv64>(EPC);
 
   case Triple::x86_64:
     if (TT.getOS() == Triple::OSType::Win32)
@@ -302,7 +305,8 @@ EPCIndirectionUtils::writeResolverBlock(JITTargetAddress ReentryFnAddr,
     return Alloc.takeError();
 
   auto SegInfo = Alloc->getSegInfo(MemProt::Read | MemProt::Exec);
-  ABI->writeResolverCode(SegInfo.WorkingMem.data(), SegInfo.Addr.getValue(),
+  ResolverBlockAddr = SegInfo.Addr.getValue();
+  ABI->writeResolverCode(SegInfo.WorkingMem.data(), ResolverBlockAddr,
                          ReentryFnAddr, ReentryCtxAddr);
 
   auto FA = Alloc->finalize();
@@ -310,7 +314,7 @@ EPCIndirectionUtils::writeResolverBlock(JITTargetAddress ReentryFnAddr,
     return FA.takeError();
 
   ResolverBlock = std::move(*FA);
-  return SegInfo.Addr.getValue();
+  return ResolverBlockAddr;
 }
 
 std::unique_ptr<IndirectStubsManager>

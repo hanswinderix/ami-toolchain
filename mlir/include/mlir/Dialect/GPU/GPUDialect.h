@@ -14,7 +14,6 @@
 #ifndef MLIR_DIALECT_GPU_GPUDIALECT_H
 #define MLIR_DIALECT_GPU_GPUDIALECT_H
 
-#include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"
 #include "mlir/Dialect/DLTI/Traits.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -27,8 +26,6 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
 namespace mlir {
-class FuncOp;
-
 namespace gpu {
 
 /// Utility class for the GPU dialect to represent triples of `Value`s
@@ -41,6 +38,14 @@ struct KernelDim3 {
 
 class AsyncTokenType
     : public Type::TypeBase<AsyncTokenType, Type, TypeStorage> {
+public:
+  // Used for generic hooks in TypeBase.
+  using Base::Base;
+};
+
+/// Device-side token storage type. There is only one type of device-side token.
+class DeviceAsyncTokenType
+    : public Type::TypeBase<DeviceAsyncTokenType, Type, TypeStorage> {
 public:
   // Used for generic hooks in TypeBase.
   using Base::Base;

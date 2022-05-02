@@ -102,12 +102,6 @@ namespace {
       (void) llvm::createDomPrinterPass();
       (void) llvm::createDomOnlyViewerPass();
       (void) llvm::createDomViewerPass();
-      (void) llvm::createGCOVProfilerPass();
-      (void) llvm::createPGOInstrumentationGenLegacyPass();
-      (void) llvm::createPGOInstrumentationUseLegacyPass();
-      (void) llvm::createPGOInstrumentationGenCreateVarLegacyPass();
-      (void) llvm::createPGOIndirectCallPromotionLegacyPass();
-      (void) llvm::createPGOMemOPSizeOptLegacyPass();
       (void) llvm::createInstrProfilingLegacyPass();
       (void) llvm::createFunctionImportPass();
       (void) llvm::createFunctionInliningPass();
@@ -123,6 +117,7 @@ namespace {
       (void) llvm::createInstSimplifyLegacyPass();
       (void) llvm::createInstructionCombiningPass();
       (void) llvm::createInternalizePass();
+      (void) llvm::createJMCInstrumenterPass();
       (void) llvm::createLCSSAPass();
       (void) llvm::createLegacyDivergenceAnalysisPass();
       (void) llvm::createLICMPass();
@@ -138,12 +133,12 @@ namespace {
       (void) llvm::createLoopRerollPass();
       (void) llvm::createLoopUnrollPass();
       (void) llvm::createLoopUnrollAndJamPass();
-      (void) llvm::createLoopUnswitchPass();
       (void) llvm::createLoopVersioningLICMPass();
       (void) llvm::createLoopIdiomPass();
       (void) llvm::createLoopRotatePass();
       (void) llvm::createLowerConstantIntrinsicsPass();
       (void) llvm::createLowerExpectIntrinsicPass();
+      (void) llvm::createLowerGlobalDtorsLegacyPass();
       (void) llvm::createLowerInvokePass();
       (void) llvm::createLowerSwitchPass();
       (void) llvm::createNaryReassociatePass();
@@ -176,6 +171,7 @@ namespace {
       (void) llvm::createStripDeadDebugInfoPass();
       (void) llvm::createStripDeadPrototypesPass();
       (void) llvm::createTailCallEliminationPass();
+      (void)llvm::createTLSVariableHoistPass();
       (void) llvm::createJumpThreadingPass();
       (void) llvm::createDFAJumpThreadingPass();
       (void) llvm::createUnifyFunctionExitNodesPass();

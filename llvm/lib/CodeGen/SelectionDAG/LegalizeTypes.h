@@ -19,7 +19,6 @@
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/Support/Compiler.h"
-#include "llvm/Support/Debug.h"
 
 namespace llvm {
 
@@ -362,6 +361,7 @@ private:
   SDValue PromoteIntRes_ABS(SDNode *N);
   SDValue PromoteIntRes_Rotate(SDNode *N);
   SDValue PromoteIntRes_FunnelShift(SDNode *N);
+  SDValue PromoteIntRes_IS_FPCLASS(SDNode *N);
 
   // Integer Operand Promotion.
   bool PromoteIntegerOperand(SDNode *N, unsigned OpNo);
@@ -784,6 +784,7 @@ private:
   SDValue ScalarizeVecRes_UNDEF(SDNode *N);
   SDValue ScalarizeVecRes_VECTOR_SHUFFLE(SDNode *N);
   SDValue ScalarizeVecRes_FP_TO_XINT_SAT(SDNode *N);
+  SDValue ScalarizeVecRes_IS_FPCLASS(SDNode *N);
 
   SDValue ScalarizeVecRes_FIX(SDNode *N);
 
@@ -821,6 +822,9 @@ private:
   /// Split mask operator of a VP intrinsic.
   std::pair<SDValue, SDValue> SplitMask(SDValue Mask);
 
+  /// Split mask operator of a VP intrinsic in a given location.
+  std::pair<SDValue, SDValue> SplitMask(SDValue Mask, const SDLoc &DL);
+
   // Helper function for incrementing the pointer when splitting
   // memory operations
   void IncrementPointer(MemSDNode *N, EVT MemVT, MachinePointerInfo &MPI,
@@ -847,11 +851,13 @@ private:
   void SplitVecRes_INSERT_SUBVECTOR(SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitVecRes_FPOWI(SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitVecRes_FCOPYSIGN(SDNode *N, SDValue &Lo, SDValue &Hi);
+  void SplitVecRes_IS_FPCLASS(SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitVecRes_INSERT_VECTOR_ELT(SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitVecRes_LOAD(LoadSDNode *LD, SDValue &Lo, SDValue &Hi);
   void SplitVecRes_VP_LOAD(VPLoadSDNode *LD, SDValue &Lo, SDValue &Hi);
   void SplitVecRes_MLOAD(MaskedLoadSDNode *MLD, SDValue &Lo, SDValue &Hi);
-  void SplitVecRes_MGATHER(MaskedGatherSDNode *MGT, SDValue &Lo, SDValue &Hi);
+  void SplitVecRes_Gather(MemSDNode *VPGT, SDValue &Lo, SDValue &Hi,
+                          bool SplitSETCC = false);
   void SplitVecRes_ScalarOp(SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitVecRes_STEP_VECTOR(SDNode *N, SDValue &Lo, SDValue &Hi);
   void SplitVecRes_SETCC(SDNode *N, SDValue &Lo, SDValue &Hi);
@@ -879,8 +885,8 @@ private:
   SDValue SplitVecOp_STORE(StoreSDNode *N, unsigned OpNo);
   SDValue SplitVecOp_VP_STORE(VPStoreSDNode *N, unsigned OpNo);
   SDValue SplitVecOp_MSTORE(MaskedStoreSDNode *N, unsigned OpNo);
-  SDValue SplitVecOp_MSCATTER(MaskedScatterSDNode *N, unsigned OpNo);
-  SDValue SplitVecOp_MGATHER(MaskedGatherSDNode *MGT, unsigned OpNo);
+  SDValue SplitVecOp_Scatter(MemSDNode *N, unsigned OpNo);
+  SDValue SplitVecOp_Gather(MemSDNode *MGT, unsigned OpNo);
   SDValue SplitVecOp_CONCAT_VECTORS(SDNode *N);
   SDValue SplitVecOp_VSETCC(SDNode *N);
   SDValue SplitVecOp_FP_ROUND(SDNode *N);
@@ -956,6 +962,7 @@ private:
   SDValue WidenVecRes_Convert_StrictFP(SDNode *N);
   SDValue WidenVecRes_FP_TO_XINT_SAT(SDNode *N);
   SDValue WidenVecRes_FCOPYSIGN(SDNode *N);
+  SDValue WidenVecRes_IS_FPCLASS(SDNode *N);
   SDValue WidenVecRes_POWI(SDNode *N);
   SDValue WidenVecRes_Unary(SDNode *N);
   SDValue WidenVecRes_InregOp(SDNode *N);
@@ -981,6 +988,7 @@ private:
   SDValue WidenVecOp_Convert(SDNode *N);
   SDValue WidenVecOp_FP_TO_XINT_SAT(SDNode *N);
   SDValue WidenVecOp_FCOPYSIGN(SDNode *N);
+  SDValue WidenVecOp_IS_FPCLASS(SDNode *N);
   SDValue WidenVecOp_VECREDUCE(SDNode *N);
   SDValue WidenVecOp_VECREDUCE_SEQ(SDNode *N);
   SDValue WidenVecOp_VP_REDUCE(SDNode *N);

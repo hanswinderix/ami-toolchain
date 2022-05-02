@@ -10,7 +10,12 @@
 #define LLVM_FLANG_FRONTEND_FRONTENDACTIONS_H
 
 #include "flang/Frontend/FrontendAction.h"
+#include "flang/Parser/parsing.h"
 #include "flang/Semantics/semantics.h"
+
+#include "mlir/IR/BuiltinOps.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Module.h"
 #include <memory>
 
 namespace Fortran::frontend {
@@ -31,10 +36,6 @@ struct MeasurementVisitor {
 //===----------------------------------------------------------------------===//
 
 class InputOutputTestAction : public FrontendAction {
-  void ExecuteAction() override;
-};
-
-class EmitObjAction : public FrontendAction {
   void ExecuteAction() override;
 };
 
@@ -110,6 +111,10 @@ class DebugDumpParseTreeAction : public PrescanAndSemaAction {
   void ExecuteAction() override;
 };
 
+class DebugDumpPFTAction : public PrescanAndSemaAction {
+  void ExecuteAction() override;
+};
+
 class DebugPreFIRTreeAction : public PrescanAndSemaAction {
   void ExecuteAction() override;
 };
@@ -128,13 +133,29 @@ class ParseSyntaxOnlyAction : public PrescanAndSemaAction {
 
 class PluginParseTreeAction : public PrescanAndSemaAction {
   void ExecuteAction() override = 0;
+
+public:
+  Fortran::parser::Parsing &getParsing();
+  /// Creates an output file. This is just a wrapper for calling
+  /// CreateDefaultOutputFile from CompilerInstance. Use it to make sure that
+  /// your plugin respects driver's `-o` flag.
+  /// \param extension  The extension to use for the output file (ignored when
+  ///                   the user decides to print to stdout via `-o -`)
+  /// \return           Null on error, ostream for the output file otherwise
+  std::unique_ptr<llvm::raw_pwrite_stream> createOutputFile(
+      llvm::StringRef extension);
 };
 
 //===----------------------------------------------------------------------===//
 // PrescanAndSemaDebug Actions
 //
 // These actions will parse the input, run the semantic checks and execute
-// their actions regardless of whether any semantic errors are found.
+// their actions _regardless of_ whether any semantic errors have been found.
+// This can be useful when adding new languge feature and when you wish to
+// investigate compiler output (e.g. the parse tree) despite any semantic
+// errors.
+//
+// NOTE: Use with care and for development only!
 //===----------------------------------------------------------------------===//
 class PrescanAndSemaDebugAction : public FrontendAction {
 
@@ -144,6 +165,63 @@ class PrescanAndSemaDebugAction : public FrontendAction {
 
 class DebugDumpAllAction : public PrescanAndSemaDebugAction {
   void ExecuteAction() override;
+};
+
+//===----------------------------------------------------------------------===//
+// CodeGen Actions
+//===----------------------------------------------------------------------===//
+/// Abstract base class for actions that generate code (MLIR, LLVM IR, assembly
+/// and machine code). Every action that inherits from this class will at
+/// least run the prescanning, parsing, semantic checks and lower the parse
+/// tree to an MLIR module.
+class CodeGenAction : public FrontendAction {
+
+  void ExecuteAction() override = 0;
+  /// Runs prescan, parsing, sema and lowers to MLIR.
+  bool BeginSourceFileAction() override;
+
+protected:
+  /// @name MLIR
+  /// {
+  std::unique_ptr<mlir::ModuleOp> mlirModule;
+  std::unique_ptr<mlir::MLIRContext> mlirCtx;
+  /// }
+
+  /// @name LLVM IR
+  std::unique_ptr<llvm::LLVMContext> llvmCtx;
+  std::unique_ptr<llvm::Module> llvmModule;
+
+  /// Generates an LLVM IR module from CodeGenAction::mlirModule and saves it
+  /// in CodeGenAction::llvmModule.
+  void GenerateLLVMIR();
+  /// }
+};
+
+class EmitMLIRAction : public CodeGenAction {
+  void ExecuteAction() override;
+};
+
+class EmitLLVMAction : public CodeGenAction {
+  void ExecuteAction() override;
+};
+
+class EmitLLVMBitcodeAction : public CodeGenAction {
+  void ExecuteAction() override;
+};
+
+class BackendAction : public CodeGenAction {
+public:
+  enum class BackendActionTy {
+    Backend_EmitAssembly, ///< Emit native assembly files
+    Backend_EmitObj ///< Emit native object files
+  };
+
+  BackendAction(BackendActionTy act) : action{act} {};
+
+private:
+  void ExecuteAction() override;
+
+  BackendActionTy action;
 };
 
 } // namespace Fortran::frontend

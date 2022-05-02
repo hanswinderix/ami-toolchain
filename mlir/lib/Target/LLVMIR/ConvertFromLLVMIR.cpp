@@ -10,15 +10,19 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/Target/LLVMIR/Import.h"
+
+#include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/Target/LLVMIR/Import.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Target/LLVMIR/TypeFromLLVM.h"
-#include "mlir/Translation.h"
+#include "mlir/Tools/mlir-translate/Translation.h"
 
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
@@ -44,6 +48,109 @@ static std::string diag(llvm::Value &v) {
   llvm::raw_string_ostream os(s);
   os << v;
   return os.str();
+}
+
+/// Creates an attribute containing ABI and preferred alignment numbers parsed
+/// a string. The string may be either "abi:preferred" or just "abi". In the
+/// latter case, the prefrred alignment is considered equal to ABI alignment.
+static DenseIntElementsAttr parseDataLayoutAlignment(MLIRContext &ctx,
+                                                     StringRef spec) {
+  auto i32 = IntegerType::get(&ctx, 32);
+
+  StringRef abiString, preferredString;
+  std::tie(abiString, preferredString) = spec.split(':');
+  int abi, preferred;
+  if (abiString.getAsInteger(/*Radix=*/10, abi))
+    return nullptr;
+
+  if (preferredString.empty())
+    preferred = abi;
+  else if (preferredString.getAsInteger(/*Radix=*/10, preferred))
+    return nullptr;
+
+  return DenseIntElementsAttr::get(VectorType::get({2}, i32), {abi, preferred});
+}
+
+/// Returns a supported MLIR floating point type of the given bit width or null
+/// if the bit width is not supported.
+static FloatType getDLFloatType(MLIRContext &ctx, int32_t bitwidth) {
+  switch (bitwidth) {
+  case 16:
+    return FloatType::getF16(&ctx);
+  case 32:
+    return FloatType::getF32(&ctx);
+  case 64:
+    return FloatType::getF64(&ctx);
+  case 80:
+    return FloatType::getF80(&ctx);
+  case 128:
+    return FloatType::getF128(&ctx);
+  default:
+    return nullptr;
+  }
+}
+
+DataLayoutSpecInterface
+mlir::translateDataLayout(const llvm::DataLayout &dataLayout,
+                          MLIRContext *context) {
+  assert(context && "expected MLIR context");
+  std::string layoutstr = dataLayout.getStringRepresentation();
+
+  // Remaining unhandled default layout defaults
+  // e (little endian if not set)
+  // p[n]:64:64:64 (non zero address spaces have 64-bit properties)
+  std::string append =
+      "p:64:64:64-S0-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64-f16:16:16-f64:"
+      "64:64-f128:128:128-v64:64:64-v128:128:128-a:0:64";
+  if (layoutstr.empty())
+    layoutstr = append;
+  else
+    layoutstr = layoutstr + "-" + append;
+
+  StringRef layout(layoutstr);
+
+  SmallVector<DataLayoutEntryInterface> entries;
+  StringSet<> seen;
+  while (!layout.empty()) {
+    // Split at '-'.
+    std::pair<StringRef, StringRef> split = layout.split('-');
+    StringRef current;
+    std::tie(current, layout) = split;
+
+    // Split at ':'.
+    StringRef kind, spec;
+    std::tie(kind, spec) = current.split(':');
+    if (seen.contains(kind))
+      continue;
+    seen.insert(kind);
+
+    char symbol = kind.front();
+    StringRef parameter = kind.substr(1);
+
+    if (symbol == 'i' || symbol == 'f') {
+      unsigned bitwidth;
+      if (parameter.getAsInteger(/*Radix=*/10, bitwidth))
+        return nullptr;
+      DenseIntElementsAttr params = parseDataLayoutAlignment(*context, spec);
+      if (!params)
+        return nullptr;
+      auto entry = DataLayoutEntryAttr::get(
+          symbol == 'i' ? static_cast<Type>(IntegerType::get(context, bitwidth))
+                        : getDLFloatType(*context, bitwidth),
+          params);
+      entries.emplace_back(entry);
+    } else if (symbol == 'e' || symbol == 'E') {
+      auto value = StringAttr::get(
+          context, symbol == 'e' ? DLTIDialect::kDataLayoutEndiannessLittle
+                                 : DLTIDialect::kDataLayoutEndiannessBig);
+      auto entry = DataLayoutEntryAttr::get(
+          StringAttr::get(context, DLTIDialect::kDataLayoutEndiannessKey),
+          value);
+      entries.emplace_back(entry);
+    }
+  }
+
+  return DataLayoutSpecAttr::get(context, entries);
 }
 
 // Handles importing globals and functions from an LLVM module.
@@ -325,10 +432,11 @@ GlobalOp Importer::processGlobal(llvm::GlobalVariable *gv) {
     alignment = align.value();
   }
 
-  GlobalOp op =
-      b.create<GlobalOp>(UnknownLoc::get(context), type, gv->isConstant(),
-                         convertLinkageFromLLVM(gv->getLinkage()),
-                         gv->getName(), valueAttr, alignment);
+  GlobalOp op = b.create<GlobalOp>(
+      UnknownLoc::get(context), type, gv->isConstant(),
+      convertLinkageFromLLVM(gv->getLinkage()), gv->getName(), valueAttr,
+      alignment, /*addr_space=*/gv->getAddressSpace(),
+      /*dso_local=*/gv->isDSOLocal(), /*thread_local=*/gv->isThreadLocal());
 
   if (gv->hasInitializer() && !valueAttr) {
     Region &r = op.getInitializerRegion();
@@ -357,15 +465,14 @@ Value Importer::processConstant(llvm::Constant *c) {
     if (!type)
       return nullptr;
     if (auto symbolRef = attr.dyn_cast<FlatSymbolRefAttr>())
-      return instMap[c] = bEntry.create<AddressOfOp>(unknownLoc, type,
-                                                     symbolRef.getValue());
-    return instMap[c] = bEntry.create<ConstantOp>(unknownLoc, type, attr);
+      return bEntry.create<AddressOfOp>(unknownLoc, type, symbolRef.getValue());
+    return bEntry.create<ConstantOp>(unknownLoc, type, attr);
   }
   if (auto *cn = dyn_cast<llvm::ConstantPointerNull>(c)) {
     Type type = processType(cn->getType());
     if (!type)
       return nullptr;
-    return instMap[c] = bEntry.create<NullOp>(unknownLoc, type);
+    return bEntry.create<NullOp>(unknownLoc, type);
   }
   if (auto *gv = dyn_cast<llvm::GlobalVariable>(c))
     return bEntry.create<AddressOfOp>(UnknownLoc::get(context),
@@ -379,17 +486,61 @@ Value Importer::processConstant(llvm::Constant *c) {
       return nullptr;
     assert(instMap.count(i));
 
+    // If we don't remove entry of `i` here, it's totally possible that the
+    // next time llvm::ConstantExpr::getAsInstruction is called again, which
+    // always allocates a new Instruction, memory address of the newly
+    // created Instruction might be the same as `i`. Making processInstruction
+    // falsely believe that the new Instruction has been processed before
+    // and raised an assertion error.
+    Value value = instMap[i];
+    instMap.erase(i);
     // Remove this zombie LLVM instruction now, leaving us only with the MLIR
     // op.
     i->deleteValue();
-    return instMap[c] = instMap[i];
+    return value;
   }
   if (auto *ue = dyn_cast<llvm::UndefValue>(c)) {
     Type type = processType(ue->getType());
     if (!type)
       return nullptr;
-    return instMap[c] = bEntry.create<UndefOp>(UnknownLoc::get(context), type);
+    return bEntry.create<UndefOp>(UnknownLoc::get(context), type);
   }
+
+  if (isa<llvm::ConstantAggregate>(c) || isa<llvm::ConstantAggregateZero>(c)) {
+    unsigned numElements = c->getNumOperands();
+    std::function<llvm::Constant *(unsigned)> getElement =
+        [&](unsigned index) -> llvm::Constant * {
+      return c->getAggregateElement(index);
+    };
+    // llvm::ConstantAggregateZero doesn't take any operand
+    // so its getNumOperands is always zero.
+    if (auto *caz = dyn_cast<llvm::ConstantAggregateZero>(c)) {
+      numElements = caz->getElementCount().getFixedValue();
+      // We want to capture the pointer rather than reference
+      // to the pointer since the latter will become dangling upon
+      // exiting the scope.
+      getElement = [=](unsigned index) -> llvm::Constant * {
+        return caz->getElementValue(index);
+      };
+    }
+
+    // Generate a llvm.undef as the root value first.
+    Type rootType = processType(c->getType());
+    if (!rootType)
+      return nullptr;
+    Value root = bEntry.create<UndefOp>(unknownLoc, rootType);
+    for (unsigned i = 0; i < numElements; ++i) {
+      llvm::Constant *element = getElement(i);
+      Value elementValue = processConstant(element);
+      if (!elementValue)
+        return nullptr;
+      ArrayAttr indexAttr = bEntry.getI32ArrayAttr({static_cast<int32_t>(i)});
+      root = bEntry.create<InsertValueOp>(UnknownLoc::get(context), rootType,
+                                          root, elementValue, indexAttr);
+    }
+    return root;
+  }
+
   emitError(unknownLoc) << "unhandled constant: " << diag(*c);
   return nullptr;
 }
@@ -402,12 +553,12 @@ Value Importer::processValue(llvm::Value *value) {
   // We don't expect to see instructions in dominator order. If we haven't seen
   // this instruction yet, create an unknown op and remap it later.
   if (isa<llvm::Instruction>(value)) {
-    OperationState state(UnknownLoc::get(context), "llvm.unknown");
     Type type = processType(value->getType());
     if (!type)
       return nullptr;
-    state.addTypes(type);
-    unknownInstMap[value] = b.createOperation(state);
+    unknownInstMap[value] =
+        b.create(UnknownLoc::get(context), b.getStringAttr("llvm.unknown"),
+                 /*operands=*/{}, type);
     return unknownInstMap[value]->getResult(0);
   }
 
@@ -563,7 +714,6 @@ LogicalResult Importer::processInstruction(llvm::Instruction *inst) {
   case llvm::Instruction::And:
   case llvm::Instruction::Or:
   case llvm::Instruction::Xor:
-  case llvm::Instruction::Alloca:
   case llvm::Instruction::Load:
   case llvm::Instruction::Store:
   case llvm::Instruction::Ret:
@@ -598,9 +748,20 @@ LogicalResult Importer::processInstruction(llvm::Instruction *inst) {
         return failure();
       state.addTypes(type);
     }
-    Operation *op = b.createOperation(state);
+    Operation *op = b.create(state);
     if (!inst->getType()->isVoidTy())
       v = op->getResult(0);
+    return success();
+  }
+  case llvm::Instruction::Alloca: {
+    Value size = processValue(inst->getOperand(0));
+    if (!size)
+      return failure();
+
+    auto *allocaInst = cast<llvm::AllocaInst>(inst);
+    v = b.create<AllocaOp>(loc, processType(inst->getType()),
+                           processType(allocaInst->getAllocatedType()), size,
+                           allocaInst->getAlign().value());
     return success();
   }
   case llvm::Instruction::ICmp: {
@@ -640,7 +801,7 @@ LogicalResult Importer::processInstruction(llvm::Instruction *inst) {
                          b.getI32VectorAttr(operandSegmentSizes));
     }
 
-    b.createOperation(state);
+    b.create(state);
     return success();
   }
   case llvm::Instruction::PHI: {
@@ -751,18 +912,34 @@ LogicalResult Importer::processInstruction(llvm::Instruction *inst) {
   case llvm::Instruction::GetElementPtr: {
     // FIXME: Support inbounds GEPs.
     llvm::GetElementPtrInst *gep = cast<llvm::GetElementPtrInst>(inst);
-    SmallVector<Value, 4> ops;
-    for (auto *op : gep->operand_values()) {
-      Value value = processValue(op);
-      if (!value)
-        return failure();
-      ops.push_back(value);
+    Value basePtr = processValue(gep->getOperand(0));
+    SmallVector<int32_t> staticIndices;
+    SmallVector<Value> dynamicIndices;
+    Type sourceElementType = processType(gep->getSourceElementType());
+    SmallVector<unsigned> staticIndexPositions;
+    GEPOp::findKnownStructIndices(sourceElementType, staticIndexPositions);
+
+    for (const auto &en :
+         llvm::enumerate(llvm::drop_begin(gep->operand_values()))) {
+      llvm::Value *operand = en.value();
+      if (llvm::find(staticIndexPositions, en.index()) ==
+          staticIndexPositions.end()) {
+        staticIndices.push_back(GEPOp::kDynamicIndex);
+        dynamicIndices.push_back(processValue(operand));
+        if (!dynamicIndices.back())
+          return failure();
+      } else {
+        auto *constantInt = cast<llvm::ConstantInt>(operand);
+        staticIndices.push_back(
+            static_cast<int32_t>(constantInt->getValue().getZExtValue()));
+      }
     }
+
     Type type = processType(inst->getType());
     if (!type)
       return failure();
-    v = b.create<GEPOp>(loc, type, ops[0],
-                        llvm::makeArrayRef(ops).drop_front());
+    v = b.create<GEPOp>(loc, type, sourceElementType, basePtr, dynamicIndices,
+                        staticIndices);
     return success();
   }
   }
@@ -811,6 +988,9 @@ LogicalResult Importer::processFunction(llvm::Function *f) {
     emitWarning(UnknownLoc::get(context),
                 "could not deduce personality, skipping it");
 
+  if (f->hasGC())
+    fop.setGarbageCollectorAttr(b.getStringAttr(f->getGC()));
+
   if (f->isDeclaration())
     return success();
 
@@ -854,12 +1034,22 @@ LogicalResult Importer::processBasicBlock(llvm::BasicBlock *bb, Block *block) {
   return success();
 }
 
-OwningModuleRef
+OwningOpRef<ModuleOp>
 mlir::translateLLVMIRToModule(std::unique_ptr<llvm::Module> llvmModule,
                               MLIRContext *context) {
   context->loadDialect<LLVMDialect>();
-  OwningModuleRef module(ModuleOp::create(
+  context->loadDialect<DLTIDialect>();
+  OwningOpRef<ModuleOp> module(ModuleOp::create(
       FileLineColLoc::get(context, "", /*line=*/0, /*column=*/0)));
+
+  DataLayoutSpecInterface dlSpec =
+      translateDataLayout(llvmModule->getDataLayout(), context);
+  if (!dlSpec) {
+    emitError(UnknownLoc::get(context), "can't translate data layout");
+    return {};
+  }
+
+  module.get()->setAttr(DLTIDialect::kDataLayoutAttrName, dlSpec);
 
   Importer deserializer(context, module.get());
   for (llvm::GlobalVariable &gv : llvmModule->globals()) {
@@ -876,8 +1066,8 @@ mlir::translateLLVMIRToModule(std::unique_ptr<llvm::Module> llvmModule,
 
 // Deserializes the LLVM bitcode stored in `input` into an MLIR module in the
 // LLVM dialect.
-OwningModuleRef translateLLVMIRToModule(llvm::SourceMgr &sourceMgr,
-                                        MLIRContext *context) {
+OwningOpRef<ModuleOp> translateLLVMIRToModule(llvm::SourceMgr &sourceMgr,
+                                              MLIRContext *context) {
   llvm::SMDiagnostic err;
   llvm::LLVMContext llvmContext;
   std::unique_ptr<llvm::Module> llvmModule = llvm::parseIR(

@@ -25,7 +25,6 @@
 #include "clang/Basic/DiagnosticDriver.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/FunctionExtras.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
@@ -132,7 +131,7 @@ protected:
     private:
       void reportDiagnostics(PathRef File, llvm::ArrayRef<Diag> Diags,
                              PublishFn Publish) {
-        auto D = Context::current().get(DiagsCallbackKey);
+        auto *D = Context::current().get(DiagsCallbackKey);
         if (!D)
           return;
         Publish([&]() {
@@ -282,22 +281,22 @@ TEST_F(TUSchedulerTests, Cancellation) {
   //    R2B
   //   U3(WantDiags=Yes)
   //    R3               <-- cancelled
-  std::vector<std::string> DiagsSeen, ReadsSeen, ReadsCanceled;
+  std::vector<StringRef> DiagsSeen, ReadsSeen, ReadsCanceled;
   {
     Notification Proceed; // Ensure we schedule everything.
     TUScheduler S(CDB, optsForTest(), captureDiags());
     auto Path = testPath("foo.cpp");
     // Helper to schedule a named update and return a function to cancel it.
-    auto Update = [&](std::string ID) -> Canceler {
+    auto Update = [&](StringRef ID) -> Canceler {
       auto T = cancelableTask();
       WithContext C(std::move(T.first));
       updateWithDiags(
-          S, Path, "//" + ID, WantDiagnostics::Yes,
+          S, Path, ("//" + ID).str(), WantDiagnostics::Yes,
           [&, ID](std::vector<Diag> Diags) { DiagsSeen.push_back(ID); });
       return std::move(T.second);
     };
     // Helper to schedule a named read and return a function to cancel it.
-    auto Read = [&](std::string ID) -> Canceler {
+    auto Read = [&](StringRef ID) -> Canceler {
       auto T = cancelableTask();
       WithContext C(std::move(T.first));
       S.runWithAST(ID, Path, [&, ID](llvm::Expected<InputsAndAST> E) {
@@ -671,11 +670,11 @@ TEST_F(TUSchedulerTests, EmptyPreamble) {
 
   FS.Files[Header] = "void foo()";
   FS.Timestamps[Header] = time_t(0);
-  auto WithPreamble = R"cpp(
+  auto *WithPreamble = R"cpp(
     #include "foo.h"
     int main() {}
   )cpp";
-  auto WithEmptyPreamble = R"cpp(int main() {})cpp";
+  auto *WithEmptyPreamble = R"cpp(int main() {})cpp";
   S.update(Foo, getInputs(Foo, WithPreamble), WantDiagnostics::Auto);
   S.runWithPreamble(
       "getNonEmptyPreamble", Foo, TUScheduler::Stale,
@@ -748,7 +747,7 @@ TEST_F(TUSchedulerTests, RunWaitsForPreamble) {
   // the same time. All reads should get the same non-null preamble.
   TUScheduler S(CDB, optsForTest());
   auto Foo = testPath("foo.cpp");
-  auto NonEmptyPreamble = R"cpp(
+  auto *NonEmptyPreamble = R"cpp(
     #define FOO 1
     #define BAR 2
 
@@ -844,7 +843,7 @@ TEST_F(TUSchedulerTests, MissingHeader) {
   auto HeaderA = testPath("a/foo.h");
   auto HeaderB = testPath("b/foo.h");
 
-  auto SourceContents = R"cpp(
+  auto *SourceContents = R"cpp(
       #include "foo.h"
       int c = b;
     )cpp";

@@ -88,6 +88,9 @@ public:
   constexpr bool IsSubnormal() const {
     return Exponent() == 0 && !GetSignificand().IsZero();
   }
+  constexpr bool IsNormal() const {
+    return !(IsInfinite() || IsNotANumber() || IsSubnormal());
+  }
 
   constexpr Real ABS() const { // non-arithmetic, no flags returned
     return {word_.IBCLR(bits - 1)};
@@ -116,6 +119,9 @@ public:
       const Real &, Rounding rounding = defaultRounding) const;
 
   ValueWithRealFlags<Real> SQRT(Rounding rounding = defaultRounding) const;
+
+  // NEAREST(), IEEE_NEXT_AFTER(), IEEE_NEXT_UP(), and IEEE_NEXT_DOWN()
+  ValueWithRealFlags<Real> NEAREST(bool upward) const;
 
   // HYPOT(x,y)=SQRT(x**2 + y**2) computed so as to avoid spurious
   // intermediate overflows.
@@ -189,6 +195,10 @@ public:
                 .IBSET(significandBits - 1)
                 .IBSET(significandBits - 2)};
   }
+
+  static constexpr Real PositiveZero() { return Real{}; }
+
+  static constexpr Real NegativeZero() { return {Word{}.MASKL(1)}; }
 
   static constexpr Real Infinity(bool negative) {
     Word infinity{maxExponent};

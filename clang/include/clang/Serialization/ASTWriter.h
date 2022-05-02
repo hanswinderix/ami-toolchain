@@ -18,6 +18,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/Type.h"
 #include "clang/Basic/LLVM.h"
+#include "clang/Basic/Module.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Sema/Sema.h"
 #include "clang/Sema/SemaConsumer.h"
@@ -465,6 +466,7 @@ private:
                        std::set<const FileEntry *> &AffectingModuleMaps);
   void WriteSourceManagerBlock(SourceManager &SourceMgr,
                                const Preprocessor &PP);
+  void writeIncludedFiles(raw_ostream &Out, const Preprocessor &PP);
   void WritePreprocessor(const Preprocessor &PP, bool IsModule);
   void WriteHeaderSearch(const HeaderSearch &HS);
   void WritePreprocessorDetail(PreprocessingRecord &PPRec,
@@ -475,7 +477,6 @@ private:
                                      bool isModule);
 
   unsigned TypeExtQualAbbrev = 0;
-  unsigned TypeFunctionProtoAbbrev = 0;
   void WriteTypeAbbrevs();
   void WriteType(QualType T);
 
@@ -678,10 +679,6 @@ public:
 
   unsigned getTypeExtQualAbbrev() const {
     return TypeExtQualAbbrev;
-  }
-
-  unsigned getTypeFunctionProtoAbbrev() const {
-    return TypeFunctionProtoAbbrev;
   }
 
   unsigned getDeclParmVarAbbrev() const { return DeclParmVarAbbrev; }

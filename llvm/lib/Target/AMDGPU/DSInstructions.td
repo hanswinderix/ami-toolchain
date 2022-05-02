@@ -462,6 +462,13 @@ let SubtargetPredicate = isGFX90APlus in {
   defm DS_ADD_RTN_F64 : DS_1A1D_RET_mc_gfx9<"ds_add_rtn_f64", VReg_64, "ds_add_f64">;
 } // End SubtargetPredicate = isGFX90APlus
 
+let SubtargetPredicate = isGFX940Plus in {
+  defm DS_PK_ADD_F16      : DS_1A1D_NORET_mc_gfx9<"ds_pk_add_f16">;
+  defm DS_PK_ADD_RTN_F16  : DS_1A1D_RET_mc_gfx9<"ds_pk_add_rtn_f16", VGPR_32, "ds_pk_add_f16">;
+  defm DS_PK_ADD_BF16     : DS_1A1D_NORET_mc_gfx9<"ds_pk_add_bf16">;
+  defm DS_PK_ADD_RTN_BF16 : DS_1A1D_RET_mc_gfx9<"ds_pk_add_rtn_bf16", VGPR_32, "ds_pk_add_bf16">;
+} // End SubtargetPredicate = isGFX940Plus
+
 defm DS_MSKOR_B32     : DS_1A2D_NORET_mc<"ds_mskor_b32">;
 defm DS_CMPST_B32     : DS_1A2D_NORET_mc<"ds_cmpst_b32">;
 defm DS_CMPST_F32     : DS_1A2D_NORET_mc<"ds_cmpst_f32">;
@@ -619,6 +626,8 @@ def DS_READ_ADDTID_B32 : DS_0A_RET<"ds_read_addtid_b32">;
 
 def DS_CONSUME       : DS_0A_RET<"ds_consume">;
 def DS_APPEND        : DS_0A_RET<"ds_append">;
+
+let SubtargetPredicate = isNotGFX90APlus in
 def DS_ORDERED_COUNT : DS_1A_RET_GDS<"ds_ordered_count">;
 
 //===----------------------------------------------------------------------===//
@@ -777,14 +786,14 @@ foreach vt = Reg32Types.types in {
 defm : DSWritePat_mc <DS_WRITE_B32, vt, "store_local">;
 }
 
-defm : DSAtomicWritePat_mc <DS_WRITE_B8, i16, "atomic_store_local_8">;
-defm : DSAtomicWritePat_mc <DS_WRITE_B8, i32, "atomic_store_local_8">;
-defm : DSAtomicWritePat_mc <DS_WRITE_B16, i16, "atomic_store_local_16">;
-defm : DSAtomicWritePat_mc <DS_WRITE_B16, i32, "atomic_store_local_16">;
-defm : DSAtomicWritePat_mc <DS_WRITE_B32, i32, "atomic_store_local_32">;
-defm : DSAtomicWritePat_mc <DS_WRITE_B64, i64, "atomic_store_local_64">;
+defm : DSAtomicWritePat_mc <DS_WRITE_B8, i16, "atomic_store_8_local">;
+defm : DSAtomicWritePat_mc <DS_WRITE_B8, i32, "atomic_store_8_local">;
+defm : DSAtomicWritePat_mc <DS_WRITE_B16, i16, "atomic_store_16_local">;
+defm : DSAtomicWritePat_mc <DS_WRITE_B16, i32, "atomic_store_16_local">;
+defm : DSAtomicWritePat_mc <DS_WRITE_B32, i32, "atomic_store_32_local">;
+defm : DSAtomicWritePat_mc <DS_WRITE_B64, i64, "atomic_store_64_local">;
 
-let OtherPredicates = [D16PreservesUnusedBits] in {
+let OtherPredicates = [HasD16LoadStore] in {
 def : DSWritePat <DS_WRITE_B16_D16_HI, i32, store_hi16_local>;
 def : DSWritePat <DS_WRITE_B8_D16_HI, i32, truncstorei8_hi16_local>;
 }
@@ -870,15 +879,30 @@ defm : DSWritePat_mc <DS_WRITE_B128, vt, "store_align16_local">;
 
 let SubtargetPredicate = HasUnalignedAccessMode in {
 
-// FIXME: From performance point of view, is ds_read_b96/ds_write_b96 better choice
-// for unaligned accesses?
+// Select 64 bit loads and stores aligned less than 4 as a single ds_read_b64/
+// ds_write_b64 instruction as this is faster than ds_read2_b32/ds_write2_b32
+// which would be used otherwise. In this case a b32 access would still be
+// misaligned, but we will have 2 of them.
+foreach vt = VReg_64.RegTypes in {
+defm : DSReadPat_mc <DS_READ_B64, vt, "load_align_less_than_4_local">;
+defm : DSWritePat_mc <DS_WRITE_B64, vt, "store_align_less_than_4_local">;
+}
+
+// Selection will split most of the unaligned 3 dword accesses due to performance
+// reasons when beneficial. Keep these two patterns for the rest of the cases.
 foreach vt = VReg_96.RegTypes in {
 defm : DSReadPat_mc <DS_READ_B96, vt, "load_local">;
 defm : DSWritePat_mc <DS_WRITE_B96, vt, "store_local">;
 }
 
-// For performance reasons, *do not* select ds_read_b128/ds_write_b128 for unaligned
-// accesses.
+// Select 128 bit loads and stores aligned less than 4 as a single ds_read_b128/
+// ds_write_b128 instruction as this is faster than ds_read2_b64/ds_write2_b64
+// which would be used otherwise. In this case a b64 access would still be
+// misaligned, but we will have 2 of them.
+foreach vt = VReg_128.RegTypes in {
+defm : DSReadPat_mc <DS_READ_B128, vt, "load_align_less_than_4_local">;
+defm : DSWritePat_mc <DS_WRITE_B128, vt, "store_align_less_than_4_local">;
+}
 
 } // End SubtargetPredicate = HasUnalignedAccessMode
 
@@ -904,69 +928,111 @@ multiclass DSAtomicRetPat_mc<DS_Pseudo inst, ValueType vt, string frag> {
   def : DSAtomicRetPat<inst, vt, !cast<PatFrag>(frag#"_region_m0_"#vt.Size), 1>;
 }
 
+multiclass DSAtomicRetNoRetPat_mc<DS_Pseudo inst, DS_Pseudo noRetInst,
+                                  ValueType vt, string frag> {
+  let OtherPredicates = [LDSRequiresM0Init] in {
+    def : DSAtomicRetPat<inst, vt,
+                         !cast<PatFrag>(frag#"_local_m0_ret_"#vt.Size)>;
+    def : DSAtomicRetPat<noRetInst, vt,
+                         !cast<PatFrag>(frag#"_local_m0_noret_"#vt.Size)>;
+  }
+
+  let OtherPredicates = [NotLDSRequiresM0Init] in {
+    def : DSAtomicRetPat<!cast<DS_Pseudo>(!cast<string>(inst)#"_gfx9"), vt,
+                         !cast<PatFrag>(frag#"_local_ret_"#vt.Size)>;
+    def : DSAtomicRetPat<!cast<DS_Pseudo>(!cast<string>(noRetInst)#"_gfx9"), vt,
+                         !cast<PatFrag>(frag#"_local_noret_"#vt.Size)>;
+  }
+
+  def : DSAtomicRetPat<inst, vt,
+                       !cast<PatFrag>(frag#"_region_m0_ret_"#vt.Size), 1>;
+  def : DSAtomicRetPat<noRetInst, vt,
+                       !cast<PatFrag>(frag#"_region_m0_noret_"#vt.Size), 1>;
+}
 
 
-class DSAtomicCmpXChg<DS_Pseudo inst, ValueType vt, PatFrag frag, bit gds=0> : GCNPat <
+
+// Caution, the order of src and cmp is the *opposite* of the BUFFER_ATOMIC_CMPSWAP opcode.
+class DSAtomicCmpXChgSwapped<DS_Pseudo inst, ValueType vt, PatFrag frag, bit gds=0> : GCNPat <
   (frag (DS1Addr1Offset i32:$ptr, i16:$offset), vt:$cmp, vt:$swap),
   (inst $ptr, getVregSrcForVT<vt>.ret:$cmp, getVregSrcForVT<vt>.ret:$swap, offset:$offset, (i1 gds))
 >;
 
-multiclass DSAtomicCmpXChg_mc<DS_Pseudo inst, ValueType vt, string frag> {
+multiclass DSAtomicCmpXChgSwapped_mc<DS_Pseudo inst, DS_Pseudo noRetInst, ValueType vt,
+                                     string frag> {
   let OtherPredicates = [LDSRequiresM0Init] in {
-    def : DSAtomicCmpXChg<inst, vt, !cast<PatFrag>(frag#"_local_m0_"#vt.Size)>;
+    def : DSAtomicCmpXChgSwapped<inst, vt, !cast<PatFrag>(frag#"_local_m0_ret_"#vt.Size)>;
+    def : DSAtomicCmpXChgSwapped<noRetInst, vt, !cast<PatFrag>(frag#"_local_m0_noret_"#vt.Size)>;
   }
 
   let OtherPredicates = [NotLDSRequiresM0Init] in {
-    def : DSAtomicCmpXChg<!cast<DS_Pseudo>(!cast<string>(inst)#"_gfx9"), vt,
-                          !cast<PatFrag>(frag#"_local_"#vt.Size)>;
+    def : DSAtomicCmpXChgSwapped<!cast<DS_Pseudo>(!cast<string>(inst)#"_gfx9"), vt,
+                                 !cast<PatFrag>(frag#"_local_ret_"#vt.Size)>;
+    def : DSAtomicCmpXChgSwapped<!cast<DS_Pseudo>(!cast<string>(noRetInst)#"_gfx9"), vt,
+                                 !cast<PatFrag>(frag#"_local_noret_"#vt.Size)>;
   }
 
-  def : DSAtomicCmpXChg<inst, vt, !cast<PatFrag>(frag#"_region_m0_"#vt.Size), 1>;
+  def : DSAtomicCmpXChgSwapped<inst, vt, !cast<PatFrag>(frag#"_region_m0_ret_"#vt.Size), 1>;
+  def : DSAtomicCmpXChgSwapped<noRetInst, vt, !cast<PatFrag>(frag#"_region_m0_noret_"#vt.Size), 1>;
 }
 
 
 
 // 32-bit atomics.
 defm : DSAtomicRetPat_mc<DS_WRXCHG_RTN_B32, i32, "atomic_swap">;
-defm : DSAtomicRetPat_mc<DS_ADD_RTN_U32, i32, "atomic_load_add">;
-defm : DSAtomicRetPat_mc<DS_SUB_RTN_U32, i32, "atomic_load_sub">;
-defm : DSAtomicRetPat_mc<DS_INC_RTN_U32, i32, "atomic_inc">;
-defm : DSAtomicRetPat_mc<DS_DEC_RTN_U32, i32, "atomic_dec">;
-defm : DSAtomicRetPat_mc<DS_AND_RTN_B32, i32, "atomic_load_and">;
-defm : DSAtomicRetPat_mc<DS_OR_RTN_B32, i32, "atomic_load_or">;
-defm : DSAtomicRetPat_mc<DS_XOR_RTN_B32, i32, "atomic_load_xor">;
-defm : DSAtomicRetPat_mc<DS_MIN_RTN_I32, i32, "atomic_load_min">;
-defm : DSAtomicRetPat_mc<DS_MAX_RTN_I32, i32, "atomic_load_max">;
-defm : DSAtomicRetPat_mc<DS_MIN_RTN_U32, i32, "atomic_load_umin">;
-defm : DSAtomicRetPat_mc<DS_MAX_RTN_U32, i32, "atomic_load_umax">;
-defm : DSAtomicRetPat_mc<DS_MIN_RTN_F32, f32, "atomic_load_fmin">;
-defm : DSAtomicRetPat_mc<DS_MAX_RTN_F32, f32, "atomic_load_fmax">;
-defm : DSAtomicCmpXChg_mc<DS_CMPST_RTN_B32, i32, "atomic_cmp_swap">;
+defm : DSAtomicRetNoRetPat_mc<DS_ADD_RTN_U32, DS_ADD_U32, i32, "atomic_load_add">;
+defm : DSAtomicRetNoRetPat_mc<DS_SUB_RTN_U32, DS_SUB_U32, i32, "atomic_load_sub">;
+defm : DSAtomicRetNoRetPat_mc<DS_INC_RTN_U32, DS_INC_U32, i32, "atomic_inc">;
+defm : DSAtomicRetNoRetPat_mc<DS_DEC_RTN_U32, DS_DEC_U32, i32, "atomic_dec">;
+defm : DSAtomicRetNoRetPat_mc<DS_AND_RTN_B32, DS_AND_B32, i32, "atomic_load_and">;
+defm : DSAtomicRetNoRetPat_mc<DS_OR_RTN_B32, DS_OR_B32, i32, "atomic_load_or">;
+defm : DSAtomicRetNoRetPat_mc<DS_XOR_RTN_B32, DS_XOR_B32, i32, "atomic_load_xor">;
+defm : DSAtomicRetNoRetPat_mc<DS_MIN_RTN_I32, DS_MIN_I32, i32, "atomic_load_min">;
+defm : DSAtomicRetNoRetPat_mc<DS_MAX_RTN_I32, DS_MAX_I32, i32, "atomic_load_max">;
+defm : DSAtomicRetNoRetPat_mc<DS_MIN_RTN_U32, DS_MIN_U32, i32, "atomic_load_umin">;
+defm : DSAtomicRetNoRetPat_mc<DS_MAX_RTN_U32, DS_MAX_U32, i32, "atomic_load_umax">;
+defm : DSAtomicRetNoRetPat_mc<DS_MIN_RTN_F32, DS_MIN_F32, f32, "atomic_load_fmin">;
+defm : DSAtomicRetNoRetPat_mc<DS_MAX_RTN_F32, DS_MAX_F32, f32, "atomic_load_fmax">;
+defm : DSAtomicCmpXChgSwapped_mc<DS_CMPST_RTN_B32, DS_CMPST_B32, i32, "atomic_cmp_swap">;
 
 let SubtargetPredicate = HasLDSFPAtomicAdd in {
-defm : DSAtomicRetPat_mc<DS_ADD_RTN_F32, f32, "atomic_load_fadd">;
+defm : DSAtomicRetNoRetPat_mc<DS_ADD_RTN_F32, DS_ADD_F32, f32, "atomic_load_fadd">;
 }
 
 // 64-bit atomics.
 defm : DSAtomicRetPat_mc<DS_WRXCHG_RTN_B64, i64, "atomic_swap">;
-defm : DSAtomicRetPat_mc<DS_ADD_RTN_U64, i64, "atomic_load_add">;
-defm : DSAtomicRetPat_mc<DS_SUB_RTN_U64, i64, "atomic_load_sub">;
-defm : DSAtomicRetPat_mc<DS_INC_RTN_U64, i64, "atomic_inc">;
-defm : DSAtomicRetPat_mc<DS_DEC_RTN_U64, i64, "atomic_dec">;
-defm : DSAtomicRetPat_mc<DS_AND_RTN_B64, i64, "atomic_load_and">;
-defm : DSAtomicRetPat_mc<DS_OR_RTN_B64, i64, "atomic_load_or">;
-defm : DSAtomicRetPat_mc<DS_XOR_RTN_B64, i64, "atomic_load_xor">;
-defm : DSAtomicRetPat_mc<DS_MIN_RTN_I64, i64, "atomic_load_min">;
-defm : DSAtomicRetPat_mc<DS_MAX_RTN_I64, i64, "atomic_load_max">;
-defm : DSAtomicRetPat_mc<DS_MIN_RTN_U64, i64, "atomic_load_umin">;
-defm : DSAtomicRetPat_mc<DS_MAX_RTN_U64, i64, "atomic_load_umax">;
-defm : DSAtomicRetPat_mc<DS_MIN_RTN_F64, f64, "atomic_load_fmin">;
-defm : DSAtomicRetPat_mc<DS_MAX_RTN_F64, f64, "atomic_load_fmax">;
+defm : DSAtomicRetNoRetPat_mc<DS_ADD_RTN_U64, DS_ADD_U64, i64, "atomic_load_add">;
+defm : DSAtomicRetNoRetPat_mc<DS_SUB_RTN_U64, DS_SUB_U64, i64, "atomic_load_sub">;
+defm : DSAtomicRetNoRetPat_mc<DS_INC_RTN_U64, DS_INC_U64, i64, "atomic_inc">;
+defm : DSAtomicRetNoRetPat_mc<DS_DEC_RTN_U64, DS_DEC_U64, i64, "atomic_dec">;
+defm : DSAtomicRetNoRetPat_mc<DS_AND_RTN_B64, DS_AND_B64, i64, "atomic_load_and">;
+defm : DSAtomicRetNoRetPat_mc<DS_OR_RTN_B64, DS_OR_B64, i64, "atomic_load_or">;
+defm : DSAtomicRetNoRetPat_mc<DS_XOR_RTN_B64, DS_XOR_B64, i64, "atomic_load_xor">;
+defm : DSAtomicRetNoRetPat_mc<DS_MIN_RTN_I64, DS_MIN_I64, i64, "atomic_load_min">;
+defm : DSAtomicRetNoRetPat_mc<DS_MAX_RTN_I64, DS_MAX_I64, i64, "atomic_load_max">;
+defm : DSAtomicRetNoRetPat_mc<DS_MIN_RTN_U64, DS_MIN_U64, i64, "atomic_load_umin">;
+defm : DSAtomicRetNoRetPat_mc<DS_MAX_RTN_U64, DS_MAX_U64, i64, "atomic_load_umax">;
+defm : DSAtomicRetNoRetPat_mc<DS_MIN_RTN_F64, DS_MIN_F64, f64, "atomic_load_fmin">;
+defm : DSAtomicRetNoRetPat_mc<DS_MAX_RTN_F64, DS_MAX_F64, f64, "atomic_load_fmax">;
 
-defm : DSAtomicCmpXChg_mc<DS_CMPST_RTN_B64, i64, "atomic_cmp_swap">;
+defm : DSAtomicCmpXChgSwapped_mc<DS_CMPST_RTN_B64, DS_CMPST_B64, i64, "atomic_cmp_swap">;
 
 let SubtargetPredicate = isGFX90APlus in {
-def : DSAtomicRetPat<DS_ADD_RTN_F64, f64, atomic_load_fadd_local_64>;
+def : DSAtomicRetPat<DS_ADD_RTN_F64, f64, atomic_load_fadd_local_ret_64>;
+def : DSAtomicRetPat<DS_ADD_F64, f64, atomic_load_fadd_local_noret_64>;
+}
+
+let SubtargetPredicate = isGFX940Plus in {
+def : DSAtomicRetPat<DS_PK_ADD_RTN_F16, v2f16, atomic_load_fadd_v2f16_local_ret_32>;
+def : DSAtomicRetPat<DS_PK_ADD_F16, v2f16, atomic_load_fadd_v2f16_local_noret_32>;
+def : GCNPat <
+  (v2i16 (int_amdgcn_ds_fadd_v2bf16_ret i32:$ptr, v2i16:$src)),
+  (DS_PK_ADD_RTN_BF16 VGPR_32:$ptr, VGPR_32:$src, 0, 0)
+>;
+def : GCNPat <
+  (v2i16 (int_amdgcn_ds_fadd_v2bf16_noret i32:$ptr, v2i16:$src)),
+  (DS_PK_ADD_BF16 VGPR_32:$ptr, VGPR_32:$src, 0, 0)
+>;
 }
 
 def : Pat <
@@ -1381,3 +1447,10 @@ let SubtargetPredicate = isGFX90APlus in {
   def DS_ADD_F64_vi     : DS_Real_vi<0x5c, DS_ADD_F64>;
   def DS_ADD_RTN_F64_vi : DS_Real_vi<0x7c, DS_ADD_RTN_F64>;
 } // End SubtargetPredicate = isGFX90APlus
+
+let SubtargetPredicate = isGFX940Plus in {
+  def DS_PK_ADD_F16_vi     : DS_Real_vi<0x17, DS_PK_ADD_F16>;
+  def DS_PK_ADD_RTN_F16_vi : DS_Real_vi<0xb7, DS_PK_ADD_RTN_F16>;
+  def DS_PK_ADD_BF16_vi     : DS_Real_vi<0x18, DS_PK_ADD_BF16>;
+  def DS_PK_ADD_RTN_BF16_vi : DS_Real_vi<0xb8, DS_PK_ADD_RTN_BF16>;
+} // End SubtargetPredicate = isGFX940Plus

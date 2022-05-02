@@ -1,12 +1,12 @@
-// RUN: mlir-opt %s -convert-scf-to-std -std-expand -convert-arith-to-llvm -convert-memref-to-llvm -convert-std-to-llvm -reconcile-unrealized-casts \
+// RUN: mlir-opt %s -pass-pipeline="func.func(convert-scf-to-cf,memref-expand,convert-arith-to-llvm),convert-memref-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts" \
 // RUN: | mlir-cpu-runner -e main -entry-point-result=void \
 // RUN: -shared-libs=%mlir_runner_utils_dir/libmlir_runner_utils%shlibext,%mlir_runner_utils_dir/libmlir_c_runner_utils%shlibext \
 // RUN: | FileCheck %s
 
 
-func private @print_memref_f32(memref<*xf32>) attributes { llvm.emit_c_interface }
+func.func private @print_memref_f32(memref<*xf32>) attributes { llvm.emit_c_interface }
 
-func @main() -> () {
+func.func @main() -> () {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
 
@@ -48,7 +48,7 @@ func @main() -> () {
   return
 }
 
-func @reshape_ranked_memref_to_ranked(%input : memref<2x3xf32>,
+func.func @reshape_ranked_memref_to_ranked(%input : memref<2x3xf32>,
                                       %shape : memref<2xindex>) {
   %output = memref.reshape %input(%shape)
                 : (memref<2x3xf32>, memref<2xindex>) -> memref<?x?xf32>
@@ -62,7 +62,7 @@ func @reshape_ranked_memref_to_ranked(%input : memref<2x3xf32>,
   return
 }
 
-func @reshape_unranked_memref_to_ranked(%input : memref<2x3xf32>,
+func.func @reshape_unranked_memref_to_ranked(%input : memref<2x3xf32>,
                                         %shape : memref<2xindex>) {
   %unranked_input = memref.cast %input : memref<2x3xf32> to memref<*xf32>
   %output = memref.reshape %input(%shape)
@@ -77,7 +77,7 @@ func @reshape_unranked_memref_to_ranked(%input : memref<2x3xf32>,
   return
 }
 
-func @reshape_ranked_memref_to_unranked(%input : memref<2x3xf32>,
+func.func @reshape_ranked_memref_to_unranked(%input : memref<2x3xf32>,
                                         %shape : memref<2xindex>) {
   %dyn_size_shape = memref.cast %shape : memref<2xindex> to memref<?xindex>
   %output = memref.reshape %input(%dyn_size_shape)
@@ -91,7 +91,7 @@ func @reshape_ranked_memref_to_unranked(%input : memref<2x3xf32>,
   return
 }
 
-func @reshape_unranked_memref_to_unranked(%input : memref<2x3xf32>,
+func.func @reshape_unranked_memref_to_unranked(%input : memref<2x3xf32>,
                                           %shape : memref<2xindex>) {
   %unranked_input = memref.cast %input : memref<2x3xf32> to memref<*xf32>
   %dyn_size_shape = memref.cast %shape : memref<2xindex> to memref<?xindex>

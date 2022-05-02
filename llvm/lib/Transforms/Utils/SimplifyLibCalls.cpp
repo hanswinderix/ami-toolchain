@@ -14,28 +14,23 @@
 #include "llvm/Transforms/Utils/SimplifyLibCalls.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Triple.h"
-#include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/ConstantFolding.h"
-#include "llvm/Analysis/OptimizationRemarkEmitter.h"
-#include "llvm/Analysis/ProfileSummaryInfo.h"
-#include "llvm/Transforms/Utils/Local.h"
-#include "llvm/Analysis/ValueTracking.h"
-#include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/Analysis/Loads.h"
+#include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Transforms/Utils/BuildLibCalls.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/SizeOpts.h"
 
 using namespace llvm;
@@ -456,8 +451,11 @@ Value *LibCallSimplifier::optimizeStrNCmp(CallInst *CI, IRBuilderBase &B) {
 
   // strncmp(x, y)  -> cnst  (if both x and y are constant strings)
   if (HasStr1 && HasStr2) {
-    StringRef SubStr1 = Str1.substr(0, Length);
-    StringRef SubStr2 = Str2.substr(0, Length);
+    // Avoid truncating the 64-bit Length to 32 bits in ILP32.
+    StringRef::size_type MinLen1 = std::min((uint64_t)Str1.size(), Length);
+    StringRef::size_type MinLen2 = std::min((uint64_t)Str2.size(), Length);
+    StringRef SubStr1 = Str1.substr(0, MinLen1);
+    StringRef SubStr2 = Str2.substr(0, MinLen2);
     return ConstantInt::get(CI->getType(), SubStr1.compare(SubStr2));
   }
 
@@ -634,12 +632,51 @@ Value *LibCallSimplifier::optimizeStrNCpy(CallInst *CI, IRBuilderBase &B) {
 }
 
 Value *LibCallSimplifier::optimizeStringLength(CallInst *CI, IRBuilderBase &B,
-                                               unsigned CharSize) {
+                                               unsigned CharSize,
+                                               Value *Bound) {
   Value *Src = CI->getArgOperand(0);
+  Type *CharTy = B.getIntNTy(CharSize);
 
-  // Constant folding: strlen("xyz") -> 3
-  if (uint64_t Len = GetStringLength(Src, CharSize))
-    return ConstantInt::get(CI->getType(), Len - 1);
+  if (isOnlyUsedInZeroEqualityComparison(CI) &&
+      (!Bound || isKnownNonZero(Bound, DL))) {
+    // Fold strlen:
+    //   strlen(x) != 0 --> *x != 0
+    //   strlen(x) == 0 --> *x == 0
+    // and likewise strnlen with constant N > 0:
+    //   strnlen(x, N) != 0 --> *x != 0
+    //   strnlen(x, N) == 0 --> *x == 0
+    return B.CreateZExt(B.CreateLoad(CharTy, Src, "char0"),
+                        CI->getType());
+  }
+
+  if (Bound) {
+    if (ConstantInt *BoundCst = dyn_cast<ConstantInt>(Bound)) {
+      if (BoundCst->isZero())
+        // Fold strnlen(s, 0) -> 0 for any s, constant or otherwise.
+        return ConstantInt::get(CI->getType(), 0);
+
+      if (BoundCst->isOne()) {
+        // Fold strnlen(s, 1) -> *s ? 1 : 0 for any s.
+        Value *CharVal = B.CreateLoad(CharTy, Src, "strnlen.char0");
+        Value *ZeroChar = ConstantInt::get(CharTy, 0);
+        Value *Cmp = B.CreateICmpNE(CharVal, ZeroChar, "strnlen.char0cmp");
+        return B.CreateZExt(Cmp, CI->getType());
+      }
+    }
+  }
+
+  if (uint64_t Len = GetStringLength(Src, CharSize)) {
+    Value *LenC = ConstantInt::get(CI->getType(), Len - 1);
+    // Fold strlen("xyz") -> 3 and strnlen("xyz", 2) -> 2
+    // and strnlen("xyz", Bound) -> min(3, Bound) for nonconstant Bound.
+    if (Bound)
+      return B.CreateBinaryIntrinsic(Intrinsic::umin, LenC, Bound);
+    return LenC;
+  }
+
+  if (Bound)
+    // Punt for strnlen for now.
+    return nullptr;
 
   // If s is a constant pointer pointing to a string literal, we can fold
   // strlen(s + x) to strlen(s) - x, when x is known to be in the range
@@ -674,22 +711,15 @@ Value *LibCallSimplifier::optimizeStringLength(CallInst *CI, IRBuilderBase &B,
 
       Value *Offset = GEP->getOperand(2);
       KnownBits Known = computeKnownBits(Offset, DL, 0, nullptr, CI, nullptr);
-      Known.Zero.flipAllBits();
       uint64_t ArrSize =
              cast<ArrayType>(GEP->getSourceElementType())->getNumElements();
 
-      // KnownZero's bits are flipped, so zeros in KnownZero now represent
-      // bits known to be zeros in Offset, and ones in KnowZero represent
-      // bits unknown in Offset. Therefore, Offset is known to be in range
-      // [0, NullTermIdx] when the flipped KnownZero is non-negative and
-      // unsigned-less-than NullTermIdx.
-      //
       // If Offset is not provably in the range [0, NullTermIdx], we can still
       // optimize if we can prove that the program has undefined behavior when
       // Offset is outside that range. That is the case when GEP->getOperand(0)
       // is a pointer to an object whose memory extent is NullTermIdx+1.
-      if ((Known.Zero.isNonNegative() && Known.Zero.ule(NullTermIdx)) ||
-          (GEP->isInBounds() && isa<GlobalVariable>(GEP->getOperand(0)) &&
+      if ((Known.isNonNegative() && Known.getMaxValue().ule(NullTermIdx)) ||
+          (isa<GlobalVariable>(GEP->getOperand(0)) &&
            NullTermIdx == ArrSize - 1)) {
         Offset = B.CreateSExtOrTrunc(Offset, CI->getType());
         return B.CreateSub(ConstantInt::get(CI->getType(), NullTermIdx),
@@ -713,12 +743,6 @@ Value *LibCallSimplifier::optimizeStringLength(CallInst *CI, IRBuilderBase &B,
     }
   }
 
-  // strlen(x) != 0 --> *x != 0
-  // strlen(x) == 0 --> *x == 0
-  if (isOnlyUsedInZeroEqualityComparison(CI))
-    return B.CreateZExt(B.CreateLoad(B.getIntNTy(CharSize), Src, "strlenfirst"),
-                        CI->getType());
-
   return nullptr;
 }
 
@@ -726,6 +750,16 @@ Value *LibCallSimplifier::optimizeStrLen(CallInst *CI, IRBuilderBase &B) {
   if (Value *V = optimizeStringLength(CI, B, 8))
     return V;
   annotateNonNullNoUndefBasedOnAccess(CI, 0);
+  return nullptr;
+}
+
+Value *LibCallSimplifier::optimizeStrNLen(CallInst *CI, IRBuilderBase &B) {
+  Value *Bound = CI->getArgOperand(1);
+  if (Value *V = optimizeStringLength(CI, B, 8, Bound))
+    return V;
+
+  if (isKnownNonZero(Bound, DL))
+    annotateNonNullNoUndefBasedOnAccess(CI, 0);
   return nullptr;
 }
 
@@ -880,35 +914,126 @@ Value *LibCallSimplifier::optimizeStrStr(CallInst *CI, IRBuilderBase &B) {
 }
 
 Value *LibCallSimplifier::optimizeMemRChr(CallInst *CI, IRBuilderBase &B) {
-  if (isKnownNonZero(CI->getOperand(2), DL))
-    annotateNonNullNoUndefBasedOnAccess(CI, 0);
-  return nullptr;
-}
-
-Value *LibCallSimplifier::optimizeMemChr(CallInst *CI, IRBuilderBase &B) {
   Value *SrcStr = CI->getArgOperand(0);
   Value *Size = CI->getArgOperand(2);
   annotateNonNullAndDereferenceable(CI, 0, Size, DL);
-  ConstantInt *CharC = dyn_cast<ConstantInt>(CI->getArgOperand(1));
+  Value *CharVal = CI->getArgOperand(1);
   ConstantInt *LenC = dyn_cast<ConstantInt>(Size);
+  Value *NullPtr = Constant::getNullValue(CI->getType());
 
-  // memchr(x, y, 0) -> null
   if (LenC) {
     if (LenC->isZero())
-      return Constant::getNullValue(CI->getType());
-  } else {
-    // From now on we need at least constant length and string.
-    return nullptr;
+      // Fold memrchr(x, y, 0) --> null.
+      return NullPtr;
+
+    if (LenC->isOne()) {
+      // Fold memrchr(x, y, 1) --> *x == y ? x : null for any x and y,
+      // constant or otherwise.
+      Value *Val = B.CreateLoad(B.getInt8Ty(), SrcStr, "memrchr.char0");
+      // Slice off the character's high end bits.
+      CharVal = B.CreateTrunc(CharVal, B.getInt8Ty());
+      Value *Cmp = B.CreateICmpEQ(Val, CharVal, "memrchr.char0cmp");
+      return B.CreateSelect(Cmp, SrcStr, NullPtr, "memrchr.sel");
+    }
   }
 
   StringRef Str;
   if (!getConstantStringInfo(SrcStr, Str, 0, /*TrimAtNul=*/false))
     return nullptr;
 
-  // Truncate the string to LenC. If Str is smaller than LenC we will still only
-  // scan the string, as reading past the end of it is undefined and we can just
-  // return null if we don't find the char.
-  Str = Str.substr(0, LenC->getZExtValue());
+  uint64_t EndOff = UINT64_MAX;
+  if (LenC) {
+    EndOff = LenC->getZExtValue();
+    if (Str.size() < EndOff)
+      // Punt out-of-bounds accesses to sanitizers and/or libc.
+      return nullptr;
+  }
+
+  if (ConstantInt *CharC = dyn_cast<ConstantInt>(CharVal)) {
+    // Fold memrchr(S, C, N) for a constant C.
+    size_t Pos = Str.rfind(CharC->getZExtValue(), EndOff);
+    if (Pos == StringRef::npos)
+      // When the character is not in the source array fold the result
+      // to null regardless of Size.
+      return NullPtr;
+
+    if (LenC)
+      // Fold memrchr(s, c, N) --> s + Pos for constant N > Pos.
+      return B.CreateGEP(B.getInt8Ty(), SrcStr, B.getInt64(Pos));
+
+    if (Str.find(CharC->getZExtValue(), Pos) == StringRef::npos) {
+      // When there is just a single occurrence of C in S, fold
+      //   memrchr(s, c, N) --> N <= Pos ? null : s + Pos
+      // for nonconstant N.
+      Value *Cmp = B.CreateICmpULE(Size, ConstantInt::get(Size->getType(),
+							  Pos),
+				   "memrchr.cmp");
+      Value *SrcPlus = B.CreateGEP(B.getInt8Ty(), SrcStr, B.getInt64(Pos),
+				   "memrchr.ptr_plus");
+      return B.CreateSelect(Cmp, NullPtr, SrcPlus, "memrchr.sel");
+    }
+  }
+
+  return nullptr;
+}
+
+Value *LibCallSimplifier::optimizeMemChr(CallInst *CI, IRBuilderBase &B) {
+  Value *SrcStr = CI->getArgOperand(0);
+  Value *Size = CI->getArgOperand(2);
+  if (isKnownNonZero(Size, DL))
+    annotateNonNullNoUndefBasedOnAccess(CI, 0);
+
+  Value *CharVal = CI->getArgOperand(1);
+  ConstantInt *CharC = dyn_cast<ConstantInt>(CharVal);
+  ConstantInt *LenC = dyn_cast<ConstantInt>(Size);
+
+  // memchr(x, y, 0) -> null
+  if (LenC) {
+    if (LenC->isZero())
+      return Constant::getNullValue(CI->getType());
+
+    if (LenC->isOne()) {
+      // Fold memchr(x, y, 1) --> *x == y ? x : null for any x and y,
+      // constant or otherwise.
+      Value *Val = B.CreateLoad(B.getInt8Ty(), SrcStr, "memchr.char0");
+      // Slice off the character's high end bits.
+      CharVal = B.CreateTrunc(CharVal, B.getInt8Ty());
+      Value *Cmp = B.CreateICmpEQ(Val, CharVal, "memchr.char0cmp");
+      Value *NullPtr = Constant::getNullValue(CI->getType());
+      return B.CreateSelect(Cmp, SrcStr, NullPtr, "memchr.sel");
+    }
+  }
+
+  StringRef Str;
+  if (!getConstantStringInfo(SrcStr, Str, 0, /*TrimAtNul=*/false))
+    return nullptr;
+
+  if (CharC) {
+    size_t Pos = Str.find(CharC->getZExtValue());
+    if (Pos == StringRef::npos)
+      // When the character is not in the source array fold the result
+      // to null regardless of Size.
+      return Constant::getNullValue(CI->getType());
+
+    // Fold memchr(s, c, n) -> n <= Pos ? null : s + Pos
+    // When the constant Size is less than or equal to the character
+    // position also fold the result to null.
+    Value *Cmp = B.CreateICmpULE(Size, ConstantInt::get(Size->getType(), Pos),
+                                 "memchr.cmp");
+    Value *NullPtr = Constant::getNullValue(CI->getType());
+    Value *SrcPlus =
+        B.CreateGEP(B.getInt8Ty(), SrcStr, B.getInt64(Pos), "memchr.ptr");
+    return B.CreateSelect(Cmp, NullPtr, SrcPlus);
+  }
+
+  if (!LenC)
+    // From now on we need a constant length and constant array.
+    return nullptr;
+
+  // Truncate the string to LenC without slicing when targeting LP64
+  // on an ILP32 host.
+  uint64_t EndOff = std::min(LenC->getZExtValue(), (uint64_t)StringRef::npos);
+  Str = Str.substr(0, EndOff);
 
   // If the char is variable but the input str and length are not we can turn
   // this memchr call into a simple bit field test. Of course this only works
@@ -920,58 +1045,47 @@ Value *LibCallSimplifier::optimizeMemChr(CallInst *CI, IRBuilderBase &B) {
   // memchr("\r\n", C, 2) != nullptr -> (1 << C & ((1 << '\r') | (1 << '\n')))
   // != 0
   //   after bounds check.
-  if (!CharC && !Str.empty() && isOnlyUsedInZeroEqualityComparison(CI)) {
-    unsigned char Max =
-        *std::max_element(reinterpret_cast<const unsigned char *>(Str.begin()),
-                          reinterpret_cast<const unsigned char *>(Str.end()));
-
-    // Make sure the bit field we're about to create fits in a register on the
-    // target.
-    // FIXME: On a 64 bit architecture this prevents us from using the
-    // interesting range of alpha ascii chars. We could do better by emitting
-    // two bitfields or shifting the range by 64 if no lower chars are used.
-    if (!DL.fitsInLegalInteger(Max + 1))
-      return nullptr;
-
-    // For the bit field use a power-of-2 type with at least 8 bits to avoid
-    // creating unnecessary illegal types.
-    unsigned char Width = NextPowerOf2(std::max((unsigned char)7, Max));
-
-    // Now build the bit field.
-    APInt Bitfield(Width, 0);
-    for (char C : Str)
-      Bitfield.setBit((unsigned char)C);
-    Value *BitfieldC = B.getInt(Bitfield);
-
-    // Adjust width of "C" to the bitfield width, then mask off the high bits.
-    Value *C = B.CreateZExtOrTrunc(CI->getArgOperand(1), BitfieldC->getType());
-    C = B.CreateAnd(C, B.getIntN(Width, 0xFF));
-
-    // First check that the bit field access is within bounds.
-    Value *Bounds = B.CreateICmp(ICmpInst::ICMP_ULT, C, B.getIntN(Width, Width),
-                                 "memchr.bounds");
-
-    // Create code that checks if the given bit is set in the field.
-    Value *Shl = B.CreateShl(B.getIntN(Width, 1ULL), C);
-    Value *Bits = B.CreateIsNotNull(B.CreateAnd(Shl, BitfieldC), "memchr.bits");
-
-    // Finally merge both checks and cast to pointer type. The inttoptr
-    // implicitly zexts the i1 to intptr type.
-    return B.CreateIntToPtr(B.CreateLogicalAnd(Bounds, Bits, "memchr"),
-                            CI->getType());
-  }
-
-  // Check if all arguments are constants.  If so, we can constant fold.
-  if (!CharC)
+  if (Str.empty() || !isOnlyUsedInZeroEqualityComparison(CI))
     return nullptr;
 
-  // Compute the offset.
-  size_t I = Str.find(CharC->getSExtValue() & 0xFF);
-  if (I == StringRef::npos) // Didn't find the char.  memchr returns null.
-    return Constant::getNullValue(CI->getType());
+  unsigned char Max =
+      *std::max_element(reinterpret_cast<const unsigned char *>(Str.begin()),
+                        reinterpret_cast<const unsigned char *>(Str.end()));
 
-  // memchr(s+n,c,l) -> gep(s+n+i,c)
-  return B.CreateGEP(B.getInt8Ty(), SrcStr, B.getInt64(I), "memchr");
+  // Make sure the bit field we're about to create fits in a register on the
+  // target.
+  // FIXME: On a 64 bit architecture this prevents us from using the
+  // interesting range of alpha ascii chars. We could do better by emitting
+  // two bitfields or shifting the range by 64 if no lower chars are used.
+  if (!DL.fitsInLegalInteger(Max + 1))
+    return nullptr;
+
+  // For the bit field use a power-of-2 type with at least 8 bits to avoid
+  // creating unnecessary illegal types.
+  unsigned char Width = NextPowerOf2(std::max((unsigned char)7, Max));
+
+  // Now build the bit field.
+  APInt Bitfield(Width, 0);
+  for (char C : Str)
+    Bitfield.setBit((unsigned char)C);
+  Value *BitfieldC = B.getInt(Bitfield);
+
+  // Adjust width of "C" to the bitfield width, then mask off the high bits.
+  Value *C = B.CreateZExtOrTrunc(CharVal, BitfieldC->getType());
+  C = B.CreateAnd(C, B.getIntN(Width, 0xFF));
+
+  // First check that the bit field access is within bounds.
+  Value *Bounds = B.CreateICmp(ICmpInst::ICMP_ULT, C, B.getIntN(Width, Width),
+                               "memchr.bounds");
+
+  // Create code that checks if the given bit is set in the field.
+  Value *Shl = B.CreateShl(B.getIntN(Width, 1ULL), C);
+  Value *Bits = B.CreateIsNotNull(B.CreateAnd(Shl, BitfieldC), "memchr.bits");
+
+  // Finally merge both checks and cast to pointer type. The inttoptr
+  // implicitly zexts the i1 to intptr type.
+  return B.CreateIntToPtr(B.CreateLogicalAnd(Bounds, Bits, "memchr"),
+                          CI->getType());
 }
 
 static Value *optimizeMemCmpConstantSize(CallInst *CI, Value *LHS, Value *RHS,
@@ -2515,8 +2629,9 @@ Value *LibCallSimplifier::optimizeSPrintFString(CallInst *CI,
     } else if (Value *V = emitStpCpy(Dest, CI->getArgOperand(2), B, TLI)) {
       // sprintf(dest, "%s", str) -> stpcpy(dest, str) - dest
       // Handle mismatched pointer types (goes away with typeless pointers?).
-      V = B.CreatePointerCast(V, Dest->getType());
-      Value *PtrDiff = B.CreatePtrDiff(V, Dest);
+      V = B.CreatePointerCast(V, B.getInt8PtrTy());
+      Dest = B.CreatePointerCast(Dest, B.getInt8PtrTy());
+      Value *PtrDiff = B.CreatePtrDiff(B.getInt8Ty(), V, Dest);
       return B.CreateIntCast(PtrDiff, CI->getType(), false);
     }
 
@@ -2870,6 +2985,8 @@ Value *LibCallSimplifier::optimizeStringMemoryLibCall(CallInst *CI,
       return optimizeStrNCpy(CI, Builder);
     case LibFunc_strlen:
       return optimizeStrLen(CI, Builder);
+    case LibFunc_strnlen:
+      return optimizeStrNLen(CI, Builder);
     case LibFunc_strpbrk:
       return optimizeStrPBrk(CI, Builder);
     case LibFunc_strndup:
@@ -3169,7 +3286,7 @@ LibCallSimplifier::LibCallSimplifier(
     function_ref<void(Instruction *, Value *)> Replacer,
     function_ref<void(Instruction *)> Eraser)
     : FortifiedSimplifier(TLI), DL(DL), TLI(TLI), ORE(ORE), BFI(BFI), PSI(PSI),
-      UnsafeFPShrink(false), Replacer(Replacer), Eraser(Eraser) {}
+      Replacer(Replacer), Eraser(Eraser) {}
 
 void LibCallSimplifier::replaceAllUsesWith(Instruction *I, Value *With) {
   // Indirect through the replacer used in this instance.

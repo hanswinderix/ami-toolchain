@@ -24,6 +24,7 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCTargetOptionsCommandFlags.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Option/Arg.h"
@@ -242,6 +243,13 @@ int main(int Argc, char **Argv) {
         << "' option\n";
   }
 
+  if (InputArgs.hasArg(OPT_debug)) {
+    DebugFlag = true;
+  }
+  for (auto *Arg : InputArgs.filtered(OPT_debug_only)) {
+    setCurrentDebugTypes(Arg->getValues().data(), Arg->getNumValues());
+  }
+
   if (InputArgs.hasArg(OPT_help)) {
     std::string Usage = llvm::formatv("{0} [ /options ] file", ProgName).str();
     T.printHelp(outs(), Usage.c_str(), "LLVM MASM Assembler",
@@ -376,7 +384,7 @@ int main(int Argc, char **Argv) {
     // Set up the AsmStreamer.
     std::unique_ptr<MCCodeEmitter> CE;
     if (InputArgs.hasArg(OPT_show_encoding))
-      CE.reset(TheTarget->createMCCodeEmitter(*MCII, *MRI, Ctx));
+      CE.reset(TheTarget->createMCCodeEmitter(*MCII, Ctx));
 
     std::unique_ptr<MCAsmBackend> MAB(
         TheTarget->createMCAsmBackend(*STI, *MRI, MCOptions));
@@ -394,7 +402,7 @@ int main(int Argc, char **Argv) {
       OS = BOS.get();
     }
 
-    MCCodeEmitter *CE = TheTarget->createMCCodeEmitter(*MCII, *MRI, Ctx);
+    MCCodeEmitter *CE = TheTarget->createMCCodeEmitter(*MCII, Ctx);
     MCAsmBackend *MAB = TheTarget->createMCAsmBackend(*STI, *MRI, MCOptions);
     Str.reset(TheTarget->createMCObjectStreamer(
         TheTriple, Ctx, std::unique_ptr<MCAsmBackend>(MAB),

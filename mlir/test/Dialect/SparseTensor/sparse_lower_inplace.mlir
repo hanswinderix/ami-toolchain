@@ -4,7 +4,7 @@
 // RUN: FileCheck %s --check-prefix=CHECK-MIR
 //
 // RUN: mlir-opt %s -sparsification --sparse-tensor-conversion \
-// RUN: --func-bufferize --tensor-constant-bufferize           \
+// RUN: --func-bufferize --arith-bufferize           \
 // RUN: --tensor-bufferize --finalizing-bufferize |            \
 // RUN: FileCheck %s --check-prefix=CHECK-LIR
 
@@ -110,7 +110,7 @@
 // CHECK-LIR:           return %[[VAL_2]] : memref<32xf64>
 // CHECK-LIR:         }
 
-func @matvec(%arga: tensor<32x64xf64, #CSR>,
+func.func @matvec(%arga: tensor<32x64xf64, #CSR>,
              %argb: tensor<64xf64>,
 	     %argx: tensor<32xf64> {linalg.inplaceable = true}) -> tensor<32xf64> {
   %0 = linalg.generic #trait_matvec

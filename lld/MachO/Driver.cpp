@@ -15,6 +15,7 @@
 #include "ObjC.h"
 #include "OutputSection.h"
 #include "OutputSegment.h"
+#include "SectionPriorities.h"
 #include "SymbolTable.h"
 #include "Symbols.h"
 #include "SyntheticSections.h"
@@ -266,8 +267,9 @@ static InputFile *addFile(StringRef path, ForceLoad forceLoadArchive,
     // We don't take a reference to cachedFile here because the
     // loadArchiveMember() call below may recursively call addFile() and
     // invalidate this reference.
-    if (ArchiveFile *cachedFile = loadedArchives[path])
-      return cachedFile;
+    auto entry = loadedArchives.find(path);
+    if (entry != loadedArchives.end())
+      return entry->second;
 
     std::unique_ptr<object::Archive> archive = CHECK(
         object::Archive::create(mbref), path + ": failed to parse archive");
@@ -325,11 +327,9 @@ static InputFile *addFile(StringRef path, ForceLoad forceLoadArchive,
   case file_magic::macho_dynamically_linked_shared_lib:
   case file_magic::macho_dynamically_linked_shared_lib_stub:
   case file_magic::tapi_file:
-    if (DylibFile *dylibFile = loadDylib(mbref)) {
-      if (isExplicit)
-        dylibFile->explicitlyLinked = true;
+    if (DylibFile *dylibFile =
+            loadDylib(mbref, nullptr, /*isBundleLoader=*/false, isExplicit))
       newFile = dylibFile;
-    }
     break;
   case file_magic::bitcode:
     newFile = make<BitcodeFile>(mbref, "", 0, isLazy);
@@ -387,12 +387,17 @@ static void addLibrary(StringRef name, bool isNeeded, bool isWeak,
   error("library not found for -l" + name);
 }
 
+static DenseSet<StringRef> loadedObjectFrameworks;
 static void addFramework(StringRef name, bool isNeeded, bool isWeak,
                          bool isReexport, bool isExplicit,
                          ForceLoad forceLoadArchive) {
   if (Optional<StringRef> path = findFramework(name)) {
-    if (auto *dylibFile = dyn_cast_or_null<DylibFile>(
-            addFile(*path, forceLoadArchive, /*isLazy=*/false, isExplicit))) {
+    if (loadedObjectFrameworks.contains(*path))
+      return;
+
+    InputFile *file =
+        addFile(*path, forceLoadArchive, /*isLazy=*/false, isExplicit);
+    if (auto *dylibFile = dyn_cast_or_null<DylibFile>(file)) {
       if (isNeeded)
         dylibFile->forceNeeded = true;
       if (isWeak)
@@ -401,6 +406,14 @@ static void addFramework(StringRef name, bool isNeeded, bool isWeak,
         config->hasReexports = true;
         dylibFile->reexport = true;
       }
+    } else if (isa_and_nonnull<ObjFile>(file) ||
+               isa_and_nonnull<BitcodeFile>(file)) {
+      // Cache frameworks containing object or bitcode files to avoid duplicate
+      // symbols. Frameworks containing static archives are cached separately
+      // in addFile() to share caching with libraries, and frameworks
+      // containing dylibs should allow overwriting of attributes such as
+      // forceNeeded by subsequent loads
+      loadedObjectFrameworks.insert(*path);
     }
     return;
   }
@@ -446,74 +459,6 @@ static void addFileList(StringRef path, bool isLazy) {
     addFile(rerootPath(path), ForceLoad::Default, isLazy);
 }
 
-// An order file has one entry per line, in the following format:
-//
-//   <cpu>:<object file>:<symbol name>
-//
-// <cpu> and <object file> are optional. If not specified, then that entry
-// matches any symbol of that name. Parsing this format is not quite
-// straightforward because the symbol name itself can contain colons, so when
-// encountering a colon, we consider the preceding characters to decide if it
-// can be a valid CPU type or file path.
-//
-// If a symbol is matched by multiple entries, then it takes the lowest-ordered
-// entry (the one nearest to the front of the list.)
-//
-// The file can also have line comments that start with '#'.
-static void parseOrderFile(StringRef path) {
-  Optional<MemoryBufferRef> buffer = readFile(path);
-  if (!buffer) {
-    error("Could not read order file at " + path);
-    return;
-  }
-
-  MemoryBufferRef mbref = *buffer;
-  size_t priority = std::numeric_limits<size_t>::max();
-  for (StringRef line : args::getLines(mbref)) {
-    StringRef objectFile, symbol;
-    line = line.take_until([](char c) { return c == '#'; }); // ignore comments
-    line = line.ltrim();
-
-    CPUType cpuType = StringSwitch<CPUType>(line)
-                          .StartsWith("i386:", CPU_TYPE_I386)
-                          .StartsWith("x86_64:", CPU_TYPE_X86_64)
-                          .StartsWith("arm:", CPU_TYPE_ARM)
-                          .StartsWith("arm64:", CPU_TYPE_ARM64)
-                          .StartsWith("ppc:", CPU_TYPE_POWERPC)
-                          .StartsWith("ppc64:", CPU_TYPE_POWERPC64)
-                          .Default(CPU_TYPE_ANY);
-
-    if (cpuType != CPU_TYPE_ANY && cpuType != target->cpuType)
-      continue;
-
-    // Drop the CPU type as well as the colon
-    if (cpuType != CPU_TYPE_ANY)
-      line = line.drop_until([](char c) { return c == ':'; }).drop_front();
-
-    constexpr std::array<StringRef, 2> fileEnds = {".o:", ".o):"};
-    for (StringRef fileEnd : fileEnds) {
-      size_t pos = line.find(fileEnd);
-      if (pos != StringRef::npos) {
-        // Split the string around the colon
-        objectFile = line.take_front(pos + fileEnd.size() - 1);
-        line = line.drop_front(pos + fileEnd.size());
-        break;
-      }
-    }
-    symbol = line.trim();
-
-    if (!symbol.empty()) {
-      SymbolPriorityEntry &entry = config->priorities[symbol];
-      if (!objectFile.empty())
-        entry.objectFiles.insert(std::make_pair(objectFile, priority));
-      else
-        entry.anyObjectFile = std::max(entry.anyObjectFile, priority);
-    }
-
-    --priority;
-  }
-}
-
 // We expect sub-library names of the form "libfoo", which will match a dylib
 // with a path of .*/libfoo.{dylib, tbd}.
 // XXX ld64 seems to ignore the extension entirely when matching sub-libraries;
@@ -545,14 +490,6 @@ static void initLLVM() {
 }
 
 static void compileBitcodeFiles() {
-  // FIXME: Remove this once LTO.cpp honors config->exportDynamic.
-  if (config->exportDynamic)
-    for (InputFile *file : inputFiles)
-      if (isa<BitcodeFile>(file)) {
-        warn("the effect of -export_dynamic on LTO is not yet implemented");
-        break;
-      }
-
   TimeTraceScope timeScope("LTO");
   auto *lto = make<BitcodeCompiler>();
   for (InputFile *file : inputFiles)
@@ -580,9 +517,11 @@ static void replaceCommonSymbols() {
     // but it's not really worth supporting the linking of 64-bit programs on
     // 32-bit archs.
     ArrayRef<uint8_t> data = {nullptr, static_cast<size_t>(common->size)};
-    auto *isec = make<ConcatInputSection>(
-        segment_names::data, section_names::common, common->getFile(), data,
-        common->align, S_ZEROFILL);
+    // FIXME avoid creating one Section per symbol?
+    auto *section =
+        make<Section>(common->getFile(), segment_names::data,
+                      section_names::common, S_ZEROFILL, /*addr=*/0);
+    auto *isec = make<ConcatInputSection>(*section, data, common->align);
     if (!osec)
       osec = ConcatOutputSection::getOrCreateForInput(isec);
     isec->parent = osec;
@@ -590,14 +529,11 @@ static void replaceCommonSymbols() {
 
     // FIXME: CommonSymbol should store isReferencedDynamically, noDeadStrip
     // and pass them on here.
-    replaceSymbol<Defined>(sym, sym->getName(), isec->getFile(), isec,
-                           /*value=*/0,
-                           /*size=*/0,
-                           /*isWeakDef=*/false,
-                           /*isExternal=*/true, common->privateExtern,
-                           /*isThumb=*/false,
-                           /*isReferencedDynamically=*/false,
-                           /*noDeadStrip=*/false);
+    replaceSymbol<Defined>(
+        sym, sym->getName(), common->getFile(), isec, /*value=*/0, /*size=*/0,
+        /*isWeakDef=*/false, /*isExternal=*/true, common->privateExtern,
+        /*includeInSymtab=*/true, /*isThumb=*/false,
+        /*isReferencedDynamically=*/false, /*noDeadStrip=*/false);
   }
 }
 
@@ -641,20 +577,22 @@ static std::string lowerDash(StringRef s) {
                      map_iterator(s.end(), toLowerDash));
 }
 
-// Has the side-effect of setting Config::platformInfo.
-static PlatformType parsePlatformVersion(const ArgList &args) {
-  const Arg *arg = args.getLastArg(OPT_platform_version);
-  if (!arg) {
-    error("must specify -platform_version");
-    return PLATFORM_UNKNOWN;
-  }
+struct PlatformVersion {
+  PlatformType platform = PLATFORM_UNKNOWN;
+  llvm::VersionTuple minimum;
+  llvm::VersionTuple sdk;
+};
 
+static PlatformVersion parsePlatformVersion(const Arg *arg) {
+  assert(arg->getOption().getID() == OPT_platform_version);
   StringRef platformStr = arg->getValue(0);
   StringRef minVersionStr = arg->getValue(1);
   StringRef sdkVersionStr = arg->getValue(2);
 
+  PlatformVersion platformVersion;
+
   // TODO(compnerd) see if we can generate this case list via XMACROS
-  PlatformType platform =
+  platformVersion.platform =
       StringSwitch<PlatformType>(lowerDash(platformStr))
           .Cases("macos", "1", PLATFORM_MACOS)
           .Cases("ios", "2", PLATFORM_IOS)
@@ -667,17 +605,52 @@ static PlatformType parsePlatformVersion(const ArgList &args) {
           .Cases("watchos-simulator", "9", PLATFORM_WATCHOSSIMULATOR)
           .Cases("driverkit", "10", PLATFORM_DRIVERKIT)
           .Default(PLATFORM_UNKNOWN);
-  if (platform == PLATFORM_UNKNOWN)
+  if (platformVersion.platform == PLATFORM_UNKNOWN)
     error(Twine("malformed platform: ") + platformStr);
   // TODO: check validity of version strings, which varies by platform
   // NOTE: ld64 accepts version strings with 5 components
   // llvm::VersionTuple accepts no more than 4 components
   // Has Apple ever published version strings with 5 components?
-  if (config->platformInfo.minimum.tryParse(minVersionStr))
+  if (platformVersion.minimum.tryParse(minVersionStr))
     error(Twine("malformed minimum version: ") + minVersionStr);
-  if (config->platformInfo.sdk.tryParse(sdkVersionStr))
+  if (platformVersion.sdk.tryParse(sdkVersionStr))
     error(Twine("malformed sdk version: ") + sdkVersionStr);
-  return platform;
+  return platformVersion;
+}
+
+// Has the side-effect of setting Config::platformInfo.
+static PlatformType parsePlatformVersions(const ArgList &args) {
+  std::map<PlatformType, PlatformVersion> platformVersions;
+  const PlatformVersion *lastVersionInfo = nullptr;
+  for (const Arg *arg : args.filtered(OPT_platform_version)) {
+    PlatformVersion version = parsePlatformVersion(arg);
+
+    // For each platform, the last flag wins:
+    // `-platform_version macos 2 3 -platform_version macos 4 5` has the same
+    // effect as just passing `-platform_version macos 4 5`.
+    // FIXME: ld64 warns on multiple flags for one platform. Should we?
+    platformVersions[version.platform] = version;
+    lastVersionInfo = &platformVersions[version.platform];
+  }
+
+  if (platformVersions.empty()) {
+    error("must specify -platform_version");
+    return PLATFORM_UNKNOWN;
+  }
+  if (platformVersions.size() > 2) {
+    error("must specify -platform_version at most twice");
+    return PLATFORM_UNKNOWN;
+  }
+  if (platformVersions.size() == 2) {
+    // FIXME: If you implement support for this, add a diagnostic if
+    // outputType is not dylib or bundle -- linkers shouldn't be able to
+    // write zippered executables.
+    warn("writing zippered outputs not yet implemented, "
+         "ignoring all but last -platform_version flag");
+  }
+  config->platformInfo.minimum = lastVersionInfo->minimum;
+  config->platformInfo.sdk = lastVersionInfo->sdk;
+  return lastVersionInfo->platform;
 }
 
 // Has the side-effect of setting Config::target.
@@ -688,7 +661,7 @@ static TargetInfo *createTargetInfo(InputArgList &args) {
     return nullptr;
   }
 
-  PlatformType platform = parsePlatformVersion(args);
+  PlatformType platform = parsePlatformVersions(args);
   config->platformInfo.target =
       MachO::Target(getArchitectureFromName(archName), platform);
 
@@ -1045,15 +1018,12 @@ static void gatherInputSections() {
   TimeTraceScope timeScope("Gathering input sections");
   int inputOrder = 0;
   for (const InputFile *file : inputFiles) {
-    for (const Section &section : file->sections) {
-      const Subsections &subsections = section.subsections;
-      if (subsections.empty())
-        continue;
-      if (subsections[0].isec->getName() == section_names::compactUnwind)
+    for (const Section *section : file->sections) {
+      if (section->name == section_names::compactUnwind)
         // Compact unwind entries require special handling elsewhere.
         continue;
       ConcatOutputSection *osec = nullptr;
-      for (const Subsection &subsection : subsections) {
+      for (const Subsection &subsection : section->subsections) {
         if (auto *isec = dyn_cast<ConcatInputSection>(subsection.isec)) {
           if (isec->isCoalescedWeak())
             continue;
@@ -1079,25 +1049,6 @@ static void gatherInputSections() {
     }
   }
   assert(inputOrder <= UnspecifiedInputOrder);
-}
-
-static void extractCallGraphProfile() {
-  TimeTraceScope timeScope("Extract call graph profile");
-  for (const InputFile *file : inputFiles) {
-    auto *obj = dyn_cast_or_null<ObjFile>(file);
-    if (!obj)
-      continue;
-    for (const CallGraphEntry &entry : obj->callGraph) {
-      assert(entry.fromIndex < obj->symbols.size() &&
-             entry.toIndex < obj->symbols.size());
-      auto *fromSym = dyn_cast_or_null<Defined>(obj->symbols[entry.fromIndex]);
-      auto *toSym = dyn_cast_or_null<Defined>(obj->symbols[entry.toIndex]);
-
-      if (!fromSym || !toSym)
-        continue;
-      config->callGraphProfile[{fromSym->isec, toSym->isec}] += entry.count;
-    }
-  }
 }
 
 static void foldIdenticalLiterals() {
@@ -1141,6 +1092,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     inputFiles.clear();
     inputSections.clear();
     loadedArchives.clear();
+    loadedObjectFrameworks.clear();
     syntheticSections.clear();
     thunkMap.clear();
 
@@ -1184,6 +1136,27 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
       args.getLastArgValue(OPT_dependency_info));
   if (errorCount())
     return false;
+
+  if (args.hasArg(OPT_pagezero_size)) {
+    uint64_t pagezeroSize = args::getHex(args, OPT_pagezero_size, 0);
+
+    // ld64 does something really weird. It attempts to realign the value to the
+    // page size, but assumes the the page size is 4K. This doesn't work with
+    // most of Apple's ARM64 devices, which use a page size of 16K. This means
+    // that it will first 4K align it by rounding down, then round up to 16K.
+    // This probably only happened because no one using this arg with anything
+    // other then 0, so no one checked if it did what is what it says it does.
+
+    // So we are not copying this weird behavior and doing the it in a logical
+    // way, by always rounding down to page size.
+    if (!isAligned(Align(target->getPageSize()), pagezeroSize)) {
+      pagezeroSize -= pagezeroSize % target->getPageSize();
+      warn("__PAGEZERO size is not page aligned, rounding down to 0x" +
+           Twine::utohexstr(pagezeroSize));
+    }
+
+    target->pageZeroSize = pagezeroSize;
+  }
 
   config->osoPrefix = args.getLastArgValue(OPT_oso_prefix);
   if (!config->osoPrefix.empty()) {
@@ -1279,9 +1252,6 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     config->umbrella = arg->getValue();
   }
   config->ltoObjPath = args.getLastArgValue(OPT_object_path_lto);
-  config->ltoNewPassManager =
-      args.hasFlag(OPT_no_lto_legacy_pass_manager, OPT_lto_legacy_pass_manager,
-                   LLVM_ENABLE_NEW_PASS_MANAGER);
   config->ltoo = args::getInteger(args, OPT_lto_O, 2);
   if (config->ltoo > 3)
     error("--lto-O: invalid optimization level: " + Twine(config->ltoo));
@@ -1427,6 +1397,11 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     symtab->addUndefined(cachedName.val(), /*file=*/nullptr,
                          /*isWeakRef=*/false);
 
+  for (const Arg *arg : args.filtered(OPT_why_live))
+    config->whyLive.insert(arg->getValue());
+  if (!config->whyLive.empty() && !config->deadStrip)
+    warn("-why_live has no effect without -dead_strip, ignoring");
+
   config->saveTemps = args.hasArg(OPT_save_temps);
 
   config->adhocCodesign = args.hasFlag(
@@ -1504,10 +1479,8 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     replaceCommonSymbols();
 
     StringRef orderFile = args.getLastArgValue(OPT_order_file);
-    if (!orderFile.empty()) {
-      parseOrderFile(orderFile);
-      config->callGraphProfileSort = false;
-    }
+    if (!orderFile.empty())
+      priorityBuilder.parseOrderFile(orderFile);
 
     referenceStubBinder();
 
@@ -1556,9 +1529,15 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
         inputFiles.insert(make<OpaqueFile>(*buffer, segName, sectName));
     }
 
+    for (const Arg *arg : args.filtered(OPT_add_empty_section)) {
+      StringRef segName = arg->getValue(0);
+      StringRef sectName = arg->getValue(1);
+      inputFiles.insert(make<OpaqueFile>(MemoryBufferRef(), segName, sectName));
+    }
+
     gatherInputSections();
     if (config->callGraphProfileSort)
-      extractCallGraphProfile();
+      priorityBuilder.extractCallGraphProfile();
 
     if (config->deadStrip)
       markLive();

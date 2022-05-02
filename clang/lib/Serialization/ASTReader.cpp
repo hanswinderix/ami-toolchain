@@ -15,6 +15,7 @@
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTMutationListener.h"
+#include "clang/AST/ASTStructuralEquivalence.h"
 #include "clang/AST/ASTUnresolvedSet.h"
 #include "clang/AST/AbstractTypeReader.h"
 #include "clang/AST/Decl.h"
@@ -42,6 +43,7 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticError.h"
 #include "clang/Basic/DiagnosticOptions.h"
+#include "clang/Basic/DiagnosticSema.h"
 #include "clang/Basic/ExceptionSpecificationType.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/FileSystemOptions.h"
@@ -1694,6 +1696,7 @@ MacroInfo *ASTReader::ReadMacroRecord(ModuleFile &F, uint64_t Offset) {
   RecordData Record;
   SmallVector<IdentifierInfo*, 16> MacroParams;
   MacroInfo *Macro = nullptr;
+  llvm::MutableArrayRef<Token> MacroTokens;
 
   while (true) {
     // Advance to the next record, but if we get to the end of the block, don't
@@ -1748,7 +1751,8 @@ MacroInfo *ASTReader::ReadMacroRecord(ModuleFile &F, uint64_t Offset) {
       MI->setDefinitionEndLoc(ReadSourceLocation(F, Record, NextIndex));
       MI->setIsUsed(Record[NextIndex++]);
       MI->setUsedForHeaderGuard(Record[NextIndex++]);
-
+      MacroTokens = MI->allocateTokens(Record[NextIndex++],
+                                       PP.getPreprocessorAllocator());
       if (RecType == PP_MACRO_FUNCTION_LIKE) {
         // Decode function-like macro info.
         bool isC99VarArgs = Record[NextIndex++];
@@ -1793,10 +1797,14 @@ MacroInfo *ASTReader::ReadMacroRecord(ModuleFile &F, uint64_t Offset) {
       // If we see a TOKEN before a PP_MACRO_*, then the file is
       // erroneous, just pretend we didn't see this.
       if (!Macro) break;
+      if (MacroTokens.empty()) {
+        Error("unexpected number of macro tokens for a macro in AST file");
+        return Macro;
+      }
 
       unsigned Idx = 0;
-      Token Tok = ReadToken(F, Record, Idx);
-      Macro->AddTokenToBody(Tok);
+      MacroTokens[0] = ReadToken(F, Record, Idx);
+      MacroTokens = MacroTokens.drop_front();
       break;
     }
     }
@@ -1887,10 +1895,6 @@ HeaderFileInfoTrait::ReadData(internal_key_ref key, const unsigned char *d,
   HFI.isPragmaOnce |= (Flags >> 4) & 0x01;
   HFI.DirInfo = (Flags >> 1) & 0x07;
   HFI.IndexHeaderMapHeader = Flags & 0x01;
-  // FIXME: Find a better way to handle this. Maybe just store a
-  // "has been included" flag?
-  HFI.NumIncludes = std::max(endian::readNext<uint16_t, little, unaligned>(d),
-                             HFI.NumIncludes);
   HFI.ControllingMacroID = Reader.getGlobalIdentifierID(
       M, endian::readNext<uint32_t, little, unaligned>(d));
   if (unsigned FrameworkOffset =
@@ -2962,6 +2966,22 @@ ASTReader::ReadControlBlock(ModuleFile &F,
   }
 }
 
+void ASTReader::readIncludedFiles(ModuleFile &F, StringRef Blob,
+                                  Preprocessor &PP) {
+  using namespace llvm::support;
+
+  const unsigned char *D = (const unsigned char *)Blob.data();
+  unsigned FileCount = endian::readNext<uint32_t, little, unaligned>(D);
+
+  for (unsigned I = 0; I < FileCount; ++I) {
+    size_t ID = endian::readNext<uint32_t, little, unaligned>(D);
+    InputFileInfo IFI = readInputFileInfo(F, ID);
+    if (llvm::ErrorOr<const FileEntry *> File =
+            PP.getFileManager().getFile(IFI.Filename))
+      PP.getIncludedFiles().insert(*File);
+  }
+}
+
 llvm::Error ASTReader::ReadASTBlock(ModuleFile &F,
                                     unsigned ClientLoadCapabilities) {
   BitstreamCursor &Stream = F.Stream;
@@ -3091,6 +3111,7 @@ llvm::Error ASTReader::ReadASTBlock(ModuleFile &F,
       case IDENTIFIER_OFFSET:
       case INTERESTING_IDENTIFIERS:
       case STATISTICS:
+      case PP_ASSUME_NONNULL_LOC:
       case PP_CONDITIONAL_STACK:
       case PP_COUNTER_VALUE:
       case SOURCE_LOCATION_OFFSETS:
@@ -3289,7 +3310,7 @@ llvm::Error ASTReader::ReadASTBlock(ModuleFile &F,
       break;
 
     case WEAK_UNDECLARED_IDENTIFIERS:
-      if (Record.size() % 4 != 0)
+      if (Record.size() % 3 != 0)
         return llvm::createStringError(std::errc::illegal_byte_sequence,
                                        "invalid weak identifiers record");
 
@@ -3304,8 +3325,7 @@ llvm::Error ASTReader::ReadASTBlock(ModuleFile &F,
         WeakUndeclaredIdentifiers.push_back(
           getGlobalIdentifierID(F, Record[I++]));
         WeakUndeclaredIdentifiers.push_back(
-          ReadSourceLocation(F, Record, I).getRawEncoding());
-        WeakUndeclaredIdentifiers.push_back(Record[I++]);
+            ReadSourceLocation(F, Record, I).getRawEncoding());
       }
       break;
 
@@ -3352,6 +3372,14 @@ llvm::Error ASTReader::ReadASTBlock(ModuleFile &F,
         }
       }
       break;
+
+    case PP_ASSUME_NONNULL_LOC: {
+      unsigned Idx = 0;
+      if (!Record.empty())
+        PP.setPreambleRecordedPragmaAssumeNonNullLoc(
+            ReadSourceLocation(F, Record, Idx));
+      break;
+    }
 
     case PP_CONDITIONAL_STACK:
       if (!Record.empty()) {
@@ -3699,6 +3727,10 @@ llvm::Error ASTReader::ReadASTBlock(ModuleFile &F,
       }
       break;
     }
+
+    case PP_INCLUDED_FILES:
+      readIncludedFiles(F, Blob, PP);
+      break;
 
     case LATE_PARSED_TEMPLATE:
       LateParsedTemplates.emplace_back(
@@ -5041,7 +5073,8 @@ std::string ASTReader::getOriginalSourceFile(
     const std::string &ASTFileName, FileManager &FileMgr,
     const PCHContainerReader &PCHContainerRdr, DiagnosticsEngine &Diags) {
   // Open the AST file.
-  auto Buffer = FileMgr.getBufferForFile(ASTFileName);
+  auto Buffer = FileMgr.getBufferForFile(ASTFileName, /*IsVolatile=*/false,
+                                         /*RequiresNullTerminator=*/false);
   if (!Buffer) {
     Diags.Report(diag::err_fe_unable_to_read_pch_file)
         << ASTFileName << Buffer.getError().message();
@@ -6013,10 +6046,9 @@ PreprocessedEntity *ASTReader::ReadPreprocessedEntity(unsigned Index) {
   case PPD_INCLUSION_DIRECTIVE: {
     const char *FullFileNameStart = Blob.data() + Record[0];
     StringRef FullFileName(FullFileNameStart, Blob.size() - Record[0]);
-    const FileEntry *File = nullptr;
+    Optional<FileEntryRef> File;
     if (!FullFileName.empty())
-      if (auto FE = PP.getFileManager().getFile(FullFileName))
-        File = *FE;
+      File = PP.getFileManager().getOptionalFileRef(FullFileName);
 
     // FIXME: Stable encoding
     InclusionDirective::InclusionKind Kind
@@ -6671,6 +6703,10 @@ void TypeLocReader::VisitEnumTypeLoc(EnumTypeLoc TL) {
 
 void TypeLocReader::VisitAttributedTypeLoc(AttributedTypeLoc TL) {
   TL.setAttr(ReadAttr());
+}
+
+void TypeLocReader::VisitBTFTagAttributedTypeLoc(BTFTagAttributedTypeLoc TL) {
+  // Nothing to do.
 }
 
 void TypeLocReader::VisitTemplateTypeParmTypeLoc(TemplateTypeParmTypeLoc TL) {
@@ -8370,11 +8406,9 @@ void ASTReader::ReadWeakUndeclaredIdentifiers(
       = DecodeIdentifierInfo(WeakUndeclaredIdentifiers[I++]);
     IdentifierInfo *AliasId
       = DecodeIdentifierInfo(WeakUndeclaredIdentifiers[I++]);
-    SourceLocation Loc
-      = SourceLocation::getFromRawEncoding(WeakUndeclaredIdentifiers[I++]);
-    bool Used = WeakUndeclaredIdentifiers[I++];
+    SourceLocation Loc =
+        SourceLocation::getFromRawEncoding(WeakUndeclaredIdentifiers[I++]);
     WeakInfo WI(AliasId, Loc);
-    WI.setUsed(Used);
     WeakIDs.push_back(std::make_pair(WeakId, WI));
   }
   WeakUndeclaredIdentifiers.clear();
@@ -9161,7 +9195,8 @@ void ASTReader::finishPendingActions() {
   while (!PendingIdentifierInfos.empty() || !PendingFunctionTypes.empty() ||
          !PendingIncompleteDeclChains.empty() || !PendingDeclChains.empty() ||
          !PendingMacroIDs.empty() || !PendingDeclContextInfos.empty() ||
-         !PendingUpdateRecords.empty()) {
+         !PendingUpdateRecords.empty() ||
+         !PendingObjCExtensionIvarRedeclarations.empty()) {
     // If any identifiers with corresponding top-level declarations have
     // been loaded, load those declarations now.
     using TopLevelDeclsMap =
@@ -9251,6 +9286,43 @@ void ASTReader::finishPendingActions() {
       auto Update = PendingUpdateRecords.pop_back_val();
       ReadingKindTracker ReadingKind(Read_Decl, *this);
       loadDeclUpdateRecords(Update);
+    }
+
+    while (!PendingObjCExtensionIvarRedeclarations.empty()) {
+      auto ExtensionsPair = PendingObjCExtensionIvarRedeclarations.back().first;
+      auto DuplicateIvars =
+          PendingObjCExtensionIvarRedeclarations.back().second;
+      llvm::DenseSet<std::pair<Decl *, Decl *>> NonEquivalentDecls;
+      StructuralEquivalenceContext Ctx(
+          ExtensionsPair.first->getASTContext(),
+          ExtensionsPair.second->getASTContext(), NonEquivalentDecls,
+          StructuralEquivalenceKind::Default, /*StrictTypeSpelling =*/false,
+          /*Complain =*/false,
+          /*ErrorOnTagTypeMismatch =*/true);
+      if (Ctx.IsEquivalent(ExtensionsPair.first, ExtensionsPair.second)) {
+        // Merge redeclared ivars with their predecessors.
+        for (auto IvarPair : DuplicateIvars) {
+          ObjCIvarDecl *Ivar = IvarPair.first, *PrevIvar = IvarPair.second;
+          // Change semantic DeclContext but keep the lexical one.
+          Ivar->setDeclContextsImpl(PrevIvar->getDeclContext(),
+                                    Ivar->getLexicalDeclContext(),
+                                    getContext());
+          getContext().setPrimaryMergedDecl(Ivar, PrevIvar->getCanonicalDecl());
+        }
+        // Invalidate duplicate extension and the cached ivar list.
+        ExtensionsPair.first->setInvalidDecl();
+        ExtensionsPair.second->getClassInterface()
+            ->getDefinition()
+            ->setIvarList(nullptr);
+      } else {
+        for (auto IvarPair : DuplicateIvars) {
+          Diag(IvarPair.first->getLocation(),
+               diag::err_duplicate_ivar_declaration)
+              << IvarPair.first->getIdentifier();
+          Diag(IvarPair.second->getLocation(), diag::note_previous_definition);
+        }
+      }
+      PendingObjCExtensionIvarRedeclarations.pop_back();
     }
   }
 
@@ -10118,13 +10190,6 @@ void ASTReader::diagnoseOdrViolations() {
       assert(!FirstTemplate == !SecondTemplate &&
              "Both pointers should be null or non-null");
 
-      enum ODRTemplateDifference {
-        ParamEmptyName,
-        ParamName,
-        ParamSingleDefaultArgument,
-        ParamDifferentDefaultArgument,
-      };
-
       if (FirstTemplate && SecondTemplate) {
         DeclHashes FirstTemplateHashes;
         DeclHashes SecondTemplateHashes;
@@ -10150,155 +10215,60 @@ void ASTReader::diagnoseOdrViolations() {
           if (FirstIt->second == SecondIt->second)
             continue;
 
-          auto ODRDiagTemplateError = [FirstRecord, &FirstModule, this](
-                                          SourceLocation Loc, SourceRange Range,
-                                          ODRTemplateDifference DiffType) {
-            return Diag(Loc, diag::err_module_odr_violation_template_parameter)
-                   << FirstRecord << FirstModule.empty() << FirstModule << Range
-                   << DiffType;
-          };
-          auto ODRDiagTemplateNote = [&SecondModule, this](
-                                         SourceLocation Loc, SourceRange Range,
-                                         ODRTemplateDifference DiffType) {
-            return Diag(Loc, diag::note_module_odr_violation_template_parameter)
-                   << SecondModule << Range << DiffType;
-          };
-
           const NamedDecl* FirstDecl = cast<NamedDecl>(FirstIt->first);
           const NamedDecl* SecondDecl = cast<NamedDecl>(SecondIt->first);
 
           assert(FirstDecl->getKind() == SecondDecl->getKind() &&
                  "Parameter Decl's should be the same kind.");
 
+          enum ODRTemplateDifference {
+            ParamEmptyName,
+            ParamName,
+            ParamSingleDefaultArgument,
+            ParamDifferentDefaultArgument,
+          };
+
+          auto hasDefaultArg = [](const NamedDecl *D) {
+            if (auto *TTP = dyn_cast<TemplateTypeParmDecl>(D))
+              return TTP->hasDefaultArgument() &&
+                      !TTP->defaultArgumentWasInherited();
+            if (auto *NTTP = dyn_cast<NonTypeTemplateParmDecl>(D))
+              return NTTP->hasDefaultArgument() &&
+                      !NTTP->defaultArgumentWasInherited();
+            auto *TTP = cast<TemplateTemplateParmDecl>(D);
+            return TTP->hasDefaultArgument() &&
+                    !TTP->defaultArgumentWasInherited();
+          };
+          bool hasFirstArg = hasDefaultArg(FirstDecl);
+          bool hasSecondArg = hasDefaultArg(SecondDecl);
+
+          ODRTemplateDifference ErrDiffType;
+          ODRTemplateDifference NoteDiffType;
+
           DeclarationName FirstName = FirstDecl->getDeclName();
           DeclarationName SecondName = SecondDecl->getDeclName();
 
           if (FirstName != SecondName) {
-            const bool FirstNameEmpty =
+            bool FirstNameEmpty =
                 FirstName.isIdentifier() && !FirstName.getAsIdentifierInfo();
-            const bool SecondNameEmpty =
-                SecondName.isIdentifier() && !SecondName.getAsIdentifierInfo();
-            assert((!FirstNameEmpty || !SecondNameEmpty) &&
-                   "Both template parameters cannot be unnamed.");
-            ODRDiagTemplateError(FirstDecl->getLocation(),
-                                 FirstDecl->getSourceRange(),
-                                 FirstNameEmpty ? ParamEmptyName : ParamName)
-                << FirstName;
-            ODRDiagTemplateNote(SecondDecl->getLocation(),
-                                SecondDecl->getSourceRange(),
-                                SecondNameEmpty ? ParamEmptyName : ParamName)
-                << SecondName;
-            break;
-          }
+            bool SecondNameEmpty = SecondName.isIdentifier() &&
+                                    !SecondName.getAsIdentifierInfo();
+            ErrDiffType = FirstNameEmpty ? ParamEmptyName : ParamName;
+            NoteDiffType = SecondNameEmpty ? ParamEmptyName : ParamName;
+          } else if (hasFirstArg == hasSecondArg)
+            ErrDiffType = NoteDiffType = ParamDifferentDefaultArgument;
+          else
+            ErrDiffType = NoteDiffType = ParamSingleDefaultArgument;
 
-          switch (FirstDecl->getKind()) {
-          default:
-            llvm_unreachable("Invalid template parameter type.");
-          case Decl::TemplateTypeParm: {
-            const auto *FirstParam = cast<TemplateTypeParmDecl>(FirstDecl);
-            const auto *SecondParam = cast<TemplateTypeParmDecl>(SecondDecl);
-            const bool HasFirstDefaultArgument =
-                FirstParam->hasDefaultArgument() &&
-                !FirstParam->defaultArgumentWasInherited();
-            const bool HasSecondDefaultArgument =
-                SecondParam->hasDefaultArgument() &&
-                !SecondParam->defaultArgumentWasInherited();
-
-            if (HasFirstDefaultArgument != HasSecondDefaultArgument) {
-              ODRDiagTemplateError(FirstDecl->getLocation(),
-                                   FirstDecl->getSourceRange(),
-                                   ParamSingleDefaultArgument)
-                  << HasFirstDefaultArgument;
-              ODRDiagTemplateNote(SecondDecl->getLocation(),
-                                  SecondDecl->getSourceRange(),
-                                  ParamSingleDefaultArgument)
-                  << HasSecondDefaultArgument;
-              break;
-            }
-
-            assert(HasFirstDefaultArgument && HasSecondDefaultArgument &&
-                   "Expecting default arguments.");
-
-            ODRDiagTemplateError(FirstDecl->getLocation(),
-                                 FirstDecl->getSourceRange(),
-                                 ParamDifferentDefaultArgument);
-            ODRDiagTemplateNote(SecondDecl->getLocation(),
-                                SecondDecl->getSourceRange(),
-                                ParamDifferentDefaultArgument);
-
-            break;
-          }
-          case Decl::NonTypeTemplateParm: {
-            const auto *FirstParam = cast<NonTypeTemplateParmDecl>(FirstDecl);
-            const auto *SecondParam = cast<NonTypeTemplateParmDecl>(SecondDecl);
-            const bool HasFirstDefaultArgument =
-                FirstParam->hasDefaultArgument() &&
-                !FirstParam->defaultArgumentWasInherited();
-            const bool HasSecondDefaultArgument =
-                SecondParam->hasDefaultArgument() &&
-                !SecondParam->defaultArgumentWasInherited();
-
-            if (HasFirstDefaultArgument != HasSecondDefaultArgument) {
-              ODRDiagTemplateError(FirstDecl->getLocation(),
-                                   FirstDecl->getSourceRange(),
-                                   ParamSingleDefaultArgument)
-                  << HasFirstDefaultArgument;
-              ODRDiagTemplateNote(SecondDecl->getLocation(),
-                                  SecondDecl->getSourceRange(),
-                                  ParamSingleDefaultArgument)
-                  << HasSecondDefaultArgument;
-              break;
-            }
-
-            assert(HasFirstDefaultArgument && HasSecondDefaultArgument &&
-                   "Expecting default arguments.");
-
-            ODRDiagTemplateError(FirstDecl->getLocation(),
-                                 FirstDecl->getSourceRange(),
-                                 ParamDifferentDefaultArgument);
-            ODRDiagTemplateNote(SecondDecl->getLocation(),
-                                SecondDecl->getSourceRange(),
-                                ParamDifferentDefaultArgument);
-
-            break;
-          }
-          case Decl::TemplateTemplateParm: {
-            const auto *FirstParam = cast<TemplateTemplateParmDecl>(FirstDecl);
-            const auto *SecondParam =
-                cast<TemplateTemplateParmDecl>(SecondDecl);
-            const bool HasFirstDefaultArgument =
-                FirstParam->hasDefaultArgument() &&
-                !FirstParam->defaultArgumentWasInherited();
-            const bool HasSecondDefaultArgument =
-                SecondParam->hasDefaultArgument() &&
-                !SecondParam->defaultArgumentWasInherited();
-
-            if (HasFirstDefaultArgument != HasSecondDefaultArgument) {
-              ODRDiagTemplateError(FirstDecl->getLocation(),
-                                   FirstDecl->getSourceRange(),
-                                   ParamSingleDefaultArgument)
-                  << HasFirstDefaultArgument;
-              ODRDiagTemplateNote(SecondDecl->getLocation(),
-                                  SecondDecl->getSourceRange(),
-                                  ParamSingleDefaultArgument)
-                  << HasSecondDefaultArgument;
-              break;
-            }
-
-            assert(HasFirstDefaultArgument && HasSecondDefaultArgument &&
-                   "Expecting default arguments.");
-
-            ODRDiagTemplateError(FirstDecl->getLocation(),
-                                 FirstDecl->getSourceRange(),
-                                 ParamDifferentDefaultArgument);
-            ODRDiagTemplateNote(SecondDecl->getLocation(),
-                                SecondDecl->getSourceRange(),
-                                ParamDifferentDefaultArgument);
-
-            break;
-          }
-          }
-
+          Diag(FirstDecl->getLocation(),
+                diag::err_module_odr_violation_template_parameter)
+              << FirstRecord << FirstModule.empty() << FirstModule
+              << FirstDecl->getSourceRange() << ErrDiffType << hasFirstArg
+              << FirstName;
+          Diag(SecondDecl->getLocation(),
+                diag::note_module_odr_violation_template_parameter)
+              << SecondModule << SecondDecl->getSourceRange() << NoteDiffType
+              << hasSecondArg << SecondName;
           break;
         }
 
@@ -10688,9 +10658,8 @@ void ASTReader::diagnoseOdrViolations() {
                     ExpandedList.push_back(&TA);
                     continue;
                   }
-                  for (const TemplateArgument &PackTA : TA.getPackAsArray()) {
-                    ExpandedList.push_back(&PackTA);
-                  }
+                  llvm::append_range(ExpandedList, llvm::make_pointer_range(
+                                                       TA.getPackAsArray()));
                 }
                 return ExpandedList;
               };
@@ -11938,6 +11907,15 @@ OMPClause *OMPClauseReader::readClause() {
     C = OMPIsDevicePtrClause::CreateEmpty(Context, Sizes);
     break;
   }
+  case llvm::omp::OMPC_has_device_addr: {
+    OMPMappableExprListSizeTy Sizes;
+    Sizes.NumVars = Record.readInt();
+    Sizes.NumUniqueDeclarations = Record.readInt();
+    Sizes.NumComponentLists = Record.readInt();
+    Sizes.NumComponents = Record.readInt();
+    C = OMPHasDeviceAddrClause::CreateEmpty(Context, Sizes);
+    break;
+  }
   case llvm::omp::OMPC_allocate:
     C = OMPAllocateClause::CreateEmpty(Context, Record.readInt());
     break;
@@ -12890,6 +12868,49 @@ void OMPClauseReader::VisitOMPIsDevicePtrClause(OMPIsDevicePtrClause *C) {
   SmallVector<OMPClauseMappableExprCommon::MappableComponent, 32> Components;
   Components.reserve(TotalComponents);
   for (unsigned i = 0; i < TotalComponents; ++i) {
+    Expr *AssociatedExpr = Record.readSubExpr();
+    auto *AssociatedDecl = Record.readDeclAs<ValueDecl>();
+    Components.emplace_back(AssociatedExpr, AssociatedDecl,
+                            /*IsNonContiguous=*/false);
+  }
+  C->setComponents(Components, ListSizes);
+}
+
+void OMPClauseReader::VisitOMPHasDeviceAddrClause(OMPHasDeviceAddrClause *C) {
+  C->setLParenLoc(Record.readSourceLocation());
+  auto NumVars = C->varlist_size();
+  auto UniqueDecls = C->getUniqueDeclarationsNum();
+  auto TotalLists = C->getTotalComponentListNum();
+  auto TotalComponents = C->getTotalComponentsNum();
+
+  SmallVector<Expr *, 16> Vars;
+  Vars.reserve(NumVars);
+  for (unsigned I = 0; I != NumVars; ++I)
+    Vars.push_back(Record.readSubExpr());
+  C->setVarRefs(Vars);
+  Vars.clear();
+
+  SmallVector<ValueDecl *, 16> Decls;
+  Decls.reserve(UniqueDecls);
+  for (unsigned I = 0; I < UniqueDecls; ++I)
+    Decls.push_back(Record.readDeclAs<ValueDecl>());
+  C->setUniqueDecls(Decls);
+
+  SmallVector<unsigned, 16> ListsPerDecl;
+  ListsPerDecl.reserve(UniqueDecls);
+  for (unsigned I = 0; I < UniqueDecls; ++I)
+    ListsPerDecl.push_back(Record.readInt());
+  C->setDeclNumLists(ListsPerDecl);
+
+  SmallVector<unsigned, 32> ListSizes;
+  ListSizes.reserve(TotalLists);
+  for (unsigned i = 0; i < TotalLists; ++i)
+    ListSizes.push_back(Record.readInt());
+  C->setComponentListSizes(ListSizes);
+
+  SmallVector<OMPClauseMappableExprCommon::MappableComponent, 32> Components;
+  Components.reserve(TotalComponents);
+  for (unsigned I = 0; I < TotalComponents; ++I) {
     Expr *AssociatedExpr = Record.readSubExpr();
     auto *AssociatedDecl = Record.readDeclAs<ValueDecl>();
     Components.emplace_back(AssociatedExpr, AssociatedDecl,

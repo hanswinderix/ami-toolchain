@@ -5,7 +5,7 @@ if (DEFINED LLVM_HAVE_TF_AOT OR DEFINED LLVM_HAVE_TF_API)
   # This url points to the most recent most which is known to be compatible with
   # LLVM. When better models are published, this url should be updated to aid
   # discoverability.
-  set(LLVM_RAEVICT_MODEL_CURRENT_URL "TO_BE_UPDATED")
+  set(LLVM_RAEVICT_MODEL_CURRENT_URL "https://github.com/google/ml-compiler-opt/releases/download/regalloc-evict-v1.0/regalloc-evict-e67430c-v1.0.tar.gz")
 
   if (DEFINED LLVM_HAVE_TF_AOT)
     tf_find_and_compile(
@@ -38,6 +38,7 @@ add_llvm_component_library(LLVMCodeGen
   CalcSpillWeights.cpp
   CallingConvLower.cpp
   CFGuardLongjmp.cpp
+  CFIFixup.cpp
   CFIInstrInserter.cpp
   CodeGen.cpp
   CodeGenCommonISel.cpp
@@ -75,6 +76,7 @@ add_llvm_component_library(LLVMCodeGen
   InterleavedAccessPass.cpp
   InterleavedLoadCombinePass.cpp
   IntrinsicLowering.cpp
+  JMCInstrumenter.cpp
   LatencyPriorityQueue.cpp
   LazyMachineBlockFrequencyInfo.cpp
   LexicalScopes.cpp
@@ -187,6 +189,8 @@ add_llvm_component_library(LLVMCodeGen
   RegUsageInfoPropagate.cpp
   ReplaceWithVeclib.cpp
   ResetMachineFunctionPass.cpp
+  RegisterBank.cpp
+  RegisterBankInfo.cpp
   SafeStack.cpp
   SafeStackLayout.cpp
   ScheduleDAG.cpp

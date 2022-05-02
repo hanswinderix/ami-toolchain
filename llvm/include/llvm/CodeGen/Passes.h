@@ -494,6 +494,9 @@ namespace llvm {
   // This pass expands indirectbr instructions.
   FunctionPass *createIndirectBrExpandPass();
 
+  /// Creates CFI Fixup pass. \see CFIFixup.cpp
+  FunctionPass *createCFIFixup();
+
   /// Creates CFI Instruction Inserter pass. \see CFIInstrInserter.cpp
   FunctionPass *createCFIInstrInserter();
 
@@ -554,6 +557,9 @@ namespace llvm {
   /// When learning an eviction policy, extract score(reward) information,
   /// otherwise this does nothing
   FunctionPass *createRegAllocScoringPass();
+
+  /// JMC instrument pass.
+  ModulePass *createJMCInstrumenterPass();
 } // End llvm namespace
 
 #endif

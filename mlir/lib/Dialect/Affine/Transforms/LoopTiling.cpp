@@ -17,11 +17,11 @@
 #include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/IR/AffineValueMap.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Affine/Passes.h"
+#include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/Transforms/LoopUtils.h"
-#include "mlir/Transforms/Utils.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 using namespace mlir;
@@ -53,11 +53,11 @@ struct LoopTiling : public AffineLoopTilingBase<LoopTiling> {
 
 /// Creates a pass to perform loop tiling on all suitable loop nests of a
 /// Function.
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLoopTilingPass(uint64_t cacheSizeBytes) {
   return std::make_unique<LoopTiling>(cacheSizeBytes);
 }
-std::unique_ptr<OperationPass<FuncOp>> mlir::createLoopTilingPass() {
+std::unique_ptr<OperationPass<func::FuncOp>> mlir::createLoopTilingPass() {
   return std::make_unique<LoopTiling>();
 }
 

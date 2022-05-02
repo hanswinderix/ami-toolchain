@@ -255,6 +255,10 @@ void tools::AddLinkerInputs(const ToolChain &TC, const InputInfoList &Inputs,
       continue;
     }
 
+    // In some error cases, the input could be Nothing; skip those.
+    if (II.isNothing())
+      continue;
+
     // Otherwise, this is a linker input argument.
     const Arg &A = II.getInputArg();
 
@@ -286,13 +290,13 @@ void tools::addLinkerCompressDebugSectionsOption(
     const ToolChain &TC, const llvm::opt::ArgList &Args,
     llvm::opt::ArgStringList &CmdArgs) {
   // GNU ld supports --compress-debug-sections=none|zlib|zlib-gnu|zlib-gabi
-  // whereas zlib is an alias to zlib-gabi. Therefore -gz=none|zlib|zlib-gnu
-  // are translated to --compress-debug-sections=none|zlib|zlib-gnu.
-  // -gz is not translated since ld --compress-debug-sections option requires an
+  // whereas zlib is an alias to zlib-gabi and zlib-gnu is obsoleted. Therefore
+  // -gz=none|zlib are translated to --compress-debug-sections=none|zlib. -gz
+  // is not translated since ld --compress-debug-sections option requires an
   // argument.
   if (const Arg *A = Args.getLastArg(options::OPT_gz_EQ)) {
     StringRef V = A->getValue();
-    if (V == "none" || V == "zlib" || V == "zlib-gnu")
+    if (V == "none" || V == "zlib")
       CmdArgs.push_back(Args.MakeArgString("--compress-debug-sections=" + V));
     else
       TC.getDriver().Diag(diag::err_drv_unsupported_option_argument)
@@ -424,6 +428,13 @@ std::string tools::getCPUName(const Driver &D, const ArgList &Args,
 
     return TargetCPUName;
   }
+  case llvm::Triple::csky:
+    if (const Arg *A = Args.getLastArg(options::OPT_mcpu_EQ))
+      return A->getValue();
+    else if (const Arg *A = Args.getLastArg(options::OPT_march_EQ))
+      return A->getValue();
+    else
+      return "ck810";
   case llvm::Triple::riscv32:
   case llvm::Triple::riscv64:
     if (const Arg *A = Args.getLastArg(options::OPT_mcpu_EQ))
@@ -475,9 +486,9 @@ llvm::StringRef tools::getLTOParallelism(const ArgList &Args, const Driver &D) {
   return LtoJobsArg->getValue();
 }
 
-// CloudABI uses -ffunction-sections and -fdata-sections by default.
+// CloudABI and PS4/PS5 use -ffunction-sections and -fdata-sections by default.
 bool tools::isUseSeparateSections(const llvm::Triple &Triple) {
-  return Triple.getOS() == llvm::Triple::CloudABI;
+  return Triple.getOS() == llvm::Triple::CloudABI || Triple.isPS();
 }
 
 void tools::addLTOOptions(const ToolChain &ToolChain, const ArgList &Args,
@@ -574,6 +585,13 @@ void tools::addLTOOptions(const ToolChain &ToolChain, const ArgList &Args,
     CmdArgs.push_back("-plugin-opt=-data-sections");
   }
 
+  // Pass an option to enable split machine functions.
+  if (auto *A = Args.getLastArg(options::OPT_fsplit_machine_functions,
+                                options::OPT_fno_split_machine_functions)) {
+    if (A->getOption().matches(options::OPT_fsplit_machine_functions))
+      CmdArgs.push_back("-plugin-opt=-split-machine-functions");
+  }
+
   if (Arg *A = getLastProfileSampleUseArg(Args)) {
     StringRef FName = A->getValue();
     if (!llvm::sys::fs::exists(FName))
@@ -612,15 +630,6 @@ void tools::addLTOOptions(const ToolChain &ToolChain, const ArgList &Args,
                                          Path));
   }
 
-  // Pass an option to enable/disable the new pass manager.
-  if (auto *A = Args.getLastArg(options::OPT_flegacy_pass_manager,
-                                options::OPT_fno_legacy_pass_manager)) {
-    if (A->getOption().matches(options::OPT_flegacy_pass_manager))
-      CmdArgs.push_back("-plugin-opt=legacy-pass-manager");
-    else
-      CmdArgs.push_back("-plugin-opt=new-pass-manager");
-  }
-
   // Setup statistics file output.
   SmallString<128> StatsFile = getStatsFileName(Args, Output, Input, D);
   if (!StatsFile.empty())
@@ -643,6 +652,33 @@ void tools::addLTOOptions(const ToolChain &ToolChain, const ArgList &Args,
 
   addMachineOutlinerArgs(D, Args, CmdArgs, ToolChain.getEffectiveTriple(),
                          /*IsLTO=*/true);
+}
+
+void tools::addOpenMPRuntimeSpecificRPath(const ToolChain &TC,
+                                          const ArgList &Args,
+                                          ArgStringList &CmdArgs) {
+
+  if (Args.hasFlag(options::OPT_fopenmp_implicit_rpath,
+                   options::OPT_fno_openmp_implicit_rpath, true)) {
+    // Default to clang lib / lib64 folder, i.e. the same location as device
+    // runtime
+    SmallString<256> DefaultLibPath =
+        llvm::sys::path::parent_path(TC.getDriver().Dir);
+    llvm::sys::path::append(DefaultLibPath, Twine("lib") + CLANG_LIBDIR_SUFFIX);
+    CmdArgs.push_back("-rpath");
+    CmdArgs.push_back(Args.MakeArgString(DefaultLibPath));
+  }
+}
+
+void tools::addOpenMPRuntimeLibraryPath(const ToolChain &TC,
+                                        const ArgList &Args,
+                                        ArgStringList &CmdArgs) {
+  // Default to clang lib / lib64 folder, i.e. the same location as device
+  // runtime.
+  SmallString<256> DefaultLibPath =
+      llvm::sys::path::parent_path(TC.getDriver().Dir);
+  llvm::sys::path::append(DefaultLibPath, Twine("lib") + CLANG_LIBDIR_SUFFIX);
+  CmdArgs.push_back(Args.MakeArgString("-L" + DefaultLibPath));
 }
 
 void tools::addArchSpecificRPath(const ToolChain &TC, const ArgList &Args,
@@ -702,6 +738,10 @@ bool tools::addOpenMPRuntime(ArgStringList &CmdArgs, const ToolChain &TC,
 
   addArchSpecificRPath(TC, Args, CmdArgs);
 
+  if (RTKind == Driver::OMPRT_OMP)
+    addOpenMPRuntimeSpecificRPath(TC, Args, CmdArgs);
+  addOpenMPRuntimeLibraryPath(TC, Args, CmdArgs);
+
   return true;
 }
 
@@ -737,7 +777,7 @@ static bool addSanitizerDynamicList(const ToolChain &TC, const ArgList &Args,
   return false;
 }
 
-static const char *getAsNeededOption(const ToolChain &TC, bool as_needed) {
+const char *tools::getAsNeededOption(const ToolChain &TC, bool as_needed) {
   assert(!TC.getTriple().isOSAIX() &&
          "AIX linker does not support any form of --as-needed option yet.");
 
@@ -752,11 +792,6 @@ static const char *getAsNeededOption(const ToolChain &TC, bool as_needed) {
 
 void tools::linkSanitizerRuntimeDeps(const ToolChain &TC,
                                      ArgStringList &CmdArgs) {
-  // Fuchsia never needs these.  Any sanitizer runtimes with system
-  // dependencies use the `.deplibs` feature instead.
-  if (TC.getTriple().isOSFuchsia())
-    return;
-
   // Force linking against the system libraries sanitizers depends on
   // (see PR15823 why this is necessary).
   CmdArgs.push_back(getAsNeededOption(TC, false));
@@ -819,6 +854,8 @@ collectSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
         SharedRuntimes.push_back("hwasan_aliases");
       else
         SharedRuntimes.push_back("hwasan");
+      if (!Args.hasArg(options::OPT_shared))
+        HelperStaticRuntimes.push_back("hwasan-preinit");
     }
   }
 
@@ -971,6 +1008,19 @@ bool tools::addSanitizerRuntimes(const ToolChain &TC, const ArgList &Args,
 
   if (SanArgs.hasCrossDsoCfi() && !AddExportDynamic)
     CmdArgs.push_back("--export-dynamic-symbol=__cfi_check");
+
+  if (SanArgs.hasMemTag()) {
+    if (!TC.getTriple().isAndroid()) {
+      TC.getDriver().Diag(diag::err_drv_unsupported_opt_for_target)
+          << "-fsanitize=memtag*" << TC.getTriple().str();
+    }
+    CmdArgs.push_back(
+        Args.MakeArgString("--android-memtag-mode=" + SanArgs.getMemtagMode()));
+    if (SanArgs.hasMemtagHeap())
+      CmdArgs.push_back("--android-memtag-heap");
+    if (SanArgs.hasMemtagStack())
+      CmdArgs.push_back("--android-memtag-stack");
+  }
 
   return !StaticRuntimes.empty() || !NonWholeStaticRuntimes.empty();
 }
@@ -1214,7 +1264,7 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
             O.matches(options::OPT_fPIE) || O.matches(options::OPT_fPIC);
       } else {
         PIE = PIC = false;
-        if (EffectiveTriple.isPS4CPU()) {
+        if (EffectiveTriple.isPS4()) {
           Arg *ModelArg = Args.getLastArg(options::OPT_mcmodel_EQ);
           StringRef Model = ModelArg ? ModelArg->getValue() : "";
           if (Model != "kernel") {
@@ -1230,7 +1280,7 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
   // Introduce a Darwin and PS4-specific hack. If the default is PIC, but the
   // PIC level would've been set to level 1, force it back to level 2 PIC
   // instead.
-  if (PIC && (Triple.isOSDarwin() || EffectiveTriple.isPS4CPU()))
+  if (PIC && (Triple.isOSDarwin() || EffectiveTriple.isPS4()))
     IsPICLevelTwo |= ToolChain.isPICDefault();
 
   // This kernel flags are a trump-card: they will disable PIC/PIE
@@ -1742,9 +1792,9 @@ bool tools::GetSDLFromOffloadArchive(
 
     std::string UnbundleArg("-unbundle");
     std::string TypeArg("-type=a");
-    std::string InputArg("-inputs=" + ArchiveOfBundles);
+    std::string InputArg("-input=" + ArchiveOfBundles);
     std::string OffloadArg("-targets=" + std::string(DeviceTriple));
-    std::string OutputArg("-outputs=" + OutputLib);
+    std::string OutputArg("-output=" + OutputLib);
 
     const char *UBProgram = DriverArgs.MakeArgString(
         T.getToolChain().GetProgramPath("clang-offload-bundler"));
@@ -1760,6 +1810,12 @@ bool tools::GetSDLFromOffloadArchive(
     // code object is found in heterogenous archive library.
     std::string AdditionalArgs("-allow-missing-bundles");
     UBArgs.push_back(C.getArgs().MakeArgString(AdditionalArgs));
+
+    // Add this flag to treat hip and hipv4 offload kinds as compatible with
+    // openmp offload kind while extracting code objects from a heterogenous
+    // archive library. Vice versa is also considered compatible.
+    std::string HipCompatibleArgs("-hip-openmp-compatible");
+    UBArgs.push_back(C.getArgs().MakeArgString(HipCompatibleArgs));
 
     C.addCommand(std::make_unique<Command>(
         JA, T, ResponseFileSupport::AtFileCurCP(), UBProgram, UBArgs, Inputs,
@@ -1889,7 +1945,7 @@ getAMDGPUCodeObjectArgument(const Driver &D, const llvm::opt::ArgList &Args) {
 void tools::checkAMDGPUCodeObjectVersion(const Driver &D,
                                          const llvm::opt::ArgList &Args) {
   const unsigned MinCodeObjVer = 2;
-  const unsigned MaxCodeObjVer = 4;
+  const unsigned MaxCodeObjVer = 5;
 
   // Emit warnings for legacy options even if they are overridden.
   if (Args.hasArg(options::OPT_mno_code_object_v3_legacy))
@@ -1992,11 +2048,12 @@ void tools::addOpenMPDeviceRTL(const Driver &D,
   }
 
   OptSpecifier LibomptargetBCPathOpt =
-      Triple.isAMDGCN() ? options::OPT_libomptarget_amdgcn_bc_path_EQ
+      Triple.isAMDGCN() ? options::OPT_libomptarget_amdgpu_bc_path_EQ
                         : options::OPT_libomptarget_nvptx_bc_path_EQ;
 
-  StringRef ArchPrefix = Triple.isAMDGCN() ? "amdgcn" : "nvptx";
-  std::string LibOmpTargetName = "libomptarget-" + BitcodeSuffix.str() + ".bc";
+  StringRef ArchPrefix = Triple.isAMDGCN() ? "amdgpu" : "nvptx";
+  std::string LibOmpTargetName =
+      ("libomptarget-" + ArchPrefix + "-" + BitcodeSuffix + ".bc").str();
 
   // First check whether user specifies bc library
   if (const Arg *A = DriverArgs.getLastArg(LibomptargetBCPathOpt)) {
@@ -2030,5 +2087,19 @@ void tools::addOpenMPDeviceRTL(const Driver &D,
     if (!FoundBCLibrary)
       D.Diag(diag::err_drv_omp_offload_target_missingbcruntime)
           << LibOmpTargetName << ArchPrefix;
+  }
+}
+void tools::addHIPRuntimeLibArgs(const ToolChain &TC,
+                                 const llvm::opt::ArgList &Args,
+                                 llvm::opt::ArgStringList &CmdArgs) {
+  if (Args.hasArg(options::OPT_hip_link) &&
+      !Args.hasArg(options::OPT_nostdlib) &&
+      !Args.hasArg(options::OPT_no_hip_rt)) {
+    TC.AddHIPRuntimeLibArgs(Args, CmdArgs);
+  } else {
+    // Claim "no HIP libraries" arguments if any
+    for (auto Arg : Args.filtered(options::OPT_no_hip_rt)) {
+      Arg->claim();
+    }
   }
 }

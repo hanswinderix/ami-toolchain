@@ -14,9 +14,14 @@
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugAbbrev.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugInfoEntry.h"
+#include "llvm/DebugInfo/DWARF/DWARFDebugLoc.h"
+#include "llvm/DebugInfo/DWARF/DWARFDebugRangeList.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugRnglists.h"
 #include "llvm/DebugInfo/DWARF/DWARFDie.h"
 #include "llvm/DebugInfo/DWARF/DWARFFormValue.h"
+#include "llvm/DebugInfo/DWARF/DWARFListTable.h"
+#include "llvm/DebugInfo/DWARF/DWARFObject.h"
+#include "llvm/DebugInfo/DWARF/DWARFSection.h"
 #include "llvm/DebugInfo/DWARF/DWARFTypeUnit.h"
 #include "llvm/Support/DataExtractor.h"
 #include "llvm/Support/Errc.h"
@@ -25,7 +30,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <utility>
 #include <vector>
 
@@ -79,7 +83,14 @@ void DWARFUnitVector::addUnitsImpl(
       if (!IndexEntry && IsDWO) {
         const DWARFUnitIndex &Index = getDWARFUnitIndex(
             Context, Header.isTypeUnit() ? DW_SECT_EXT_TYPES : DW_SECT_INFO);
-        IndexEntry = Index.getFromOffset(Header.getOffset());
+        if (Index) {
+          if (Header.isTypeUnit())
+            IndexEntry = Index.getFromHash(Header.getTypeHash());
+          else if (auto DWOId = Header.getDWOId())
+            IndexEntry = Index.getFromHash(*DWOId);
+        }
+        if (!IndexEntry)
+          IndexEntry = Index.getFromOffset(Header.getOffset());
       }
       if (IndexEntry && !Header.applyIndexEntry(IndexEntry))
         return nullptr;
@@ -407,7 +418,7 @@ void DWARFUnit::extractDIEsToVector(
     assert((Parents.back() == UINT32_MAX || Parents.back() <= Dies.size()) &&
            "Wrong parent index");
 
-    // Extract die. Stop if any error occured.
+    // Extract die. Stop if any error occurred.
     if (!DIE.extractFast(*this, &DIEOffset, DebugInfoData, NextCUOffset,
                          Parents.back()))
       break;

@@ -37,9 +37,8 @@ def FunctionOpInterface : OpInterface<"FunctionOpInterface"> {
     The function, aside from implementing the various interface methods,
     should have the following ODS arguments:
 
-      - `type` (required)
+      - `function_type` (required)
         * A TypeAttr that holds the signature type of the function.
-        * TODO: this field will soon be renamed to something less generic.
 
       - `arg_attrs` (optional)
         * An ArrayAttr of DictionaryAttr that contains attribute dictionaries
@@ -73,33 +72,85 @@ def FunctionOpInterface : OpInterface<"FunctionOpInterface"> {
     "::mlir::Type", "cloneTypeWith", (ins
       "::mlir::TypeRange":$inputs, "::mlir::TypeRange":$results
     ), /*methodBody=*/[{}], /*defaultImplementation=*/[{
-      return $_op.getType().clone(inputs, results);
+      return $_op.getFunctionType().clone(inputs, results);
     }]>,
 
     InterfaceMethod<[{
       Verify the contents of the body of this function.
 
-      Note: The default implementation merely checks that of the entry block
-      exists, it has the same number arguments as the function type.
+      Note: The default implementation merely checks that if the entry block
+      exists, it has the same number and type of arguments as the function type.
     }],
     "::mlir::LogicalResult", "verifyBody", (ins),
     /*methodBody=*/[{}], /*defaultImplementation=*/[{
       if ($_op.isExternal())
         return success();
+      ArrayRef<Type> fnInputTypes = $_op.getArgumentTypes();
+      // NOTE: This should just be $_op.front() but access generically
+      // because the interface methods defined here may be shadowed in
+      // arbitrary ways. https://github.com/llvm/llvm-project/issues/54807
+      Block &entryBlock = $_op->getRegion(0).front();
 
-      unsigned numArguments = $_op.getNumArguments();
-      if ($_op.front().getNumArguments() != numArguments)
+      unsigned numArguments = fnInputTypes.size();
+      if (entryBlock.getNumArguments() != numArguments)
         return $_op.emitOpError("entry block must have ")
               << numArguments << " arguments to match function signature";
+
+      for (unsigned i = 0, e = fnInputTypes.size(); i != e; ++i) {
+        Type argType = entryBlock.getArgument(i).getType();
+        if (fnInputTypes[i] != argType) {
+          return $_op.emitOpError("type of entry block argument #")
+                << i << '(' << argType
+                << ") must match the type of the corresponding argument in "
+                << "function signature(" << fnInputTypes[i] << ')';
+        }
+      }
+
       return success();
     }]>,
     InterfaceMethod<[{
       Verify the type attribute of the function for derived op-specific
       invariants.
     }],
-    "::mlir::LogicalResult", "verifyType">,
+    "::mlir::LogicalResult", "verifyType", (ins),
+    /*methodBody=*/[{}], /*defaultImplementation=*/[{
+      return success();
+    }]>,
   ];
 
+  let extraClassDeclaration = [{
+    //===------------------------------------------------------------------===//
+    // Name
+    //===------------------------------------------------------------------===//
+
+    /// Return the name of the function.
+    StringRef getName() { return SymbolTable::getSymbolName(*this); }
+  }];
+  let extraTraitClassDeclaration = [{
+    //===------------------------------------------------------------------===//
+    // Builders
+    //===------------------------------------------------------------------===//
+
+    /// Build the function with the given name, attributes, and type. This
+    /// builder also inserts an entry block into the function body with the
+    /// given argument types.
+    static void buildWithEntryBlock(
+        OpBuilder &builder, OperationState &state, StringRef name, Type type,
+        ArrayRef<NamedAttribute> attrs, ArrayRef<Type> inputTypes) {
+      state.addAttribute(SymbolTable::getSymbolAttrName(),
+                        builder.getStringAttr(name));
+      state.addAttribute(function_interface_impl::getTypeAttrName(),
+                        TypeAttr::get(type));
+      state.attributes.append(attrs.begin(), attrs.end());
+
+      // Add the function body.
+      Region *bodyRegion = state.addRegion();
+      Block *body = new Block();
+      bodyRegion->push_back(body);
+      for (Type input : inputTypes)
+        body->addArgument(input, state.location);
+    }
+  }];
   let extraSharedClassDeclaration = [{
     /// Block list iterator types.
     using BlockListType = Region::BlockListType;
@@ -156,7 +207,7 @@ def FunctionOpInterface : OpInterface<"FunctionOpInterface"> {
       assert(empty() && "function already has an entry block");
       Block *entry = new Block();
       push_back(entry);
-      
+
       // FIXME: Allow for passing in locations for these arguments instead of using
       // the operations location.
       ArrayRef<Type> inputTypes = $_op.getArgumentTypes();
@@ -209,13 +260,13 @@ def FunctionOpInterface : OpInterface<"FunctionOpInterface"> {
     }
 
     /// Return the attribute containing the type of this function.
-    TypeAttr getTypeAttr() {
+    TypeAttr getFunctionTypeAttr() {
       return this->getOperation()->template getAttrOfType<TypeAttr>(
           getTypeAttrName());
     }
 
     /// Return the type of this function.
-    Type getType() { return getTypeAttr().getValue(); }
+    Type getFunctionType() { return getFunctionTypeAttr().getValue(); }
 
     //===------------------------------------------------------------------===//
     // Argument and Result Handling
@@ -280,27 +331,31 @@ def FunctionOpInterface : OpInterface<"FunctionOpInterface"> {
     }
 
     /// Erase a single argument at `argIndex`.
-    void eraseArgument(unsigned argIndex) { eraseArguments({argIndex}); }
+    void eraseArgument(unsigned argIndex) {
+      BitVector argsToErase($_op.getNumArguments());
+      argsToErase.set(argIndex);
+      eraseArguments(argsToErase);
+    }
 
     /// Erases the arguments listed in `argIndices`.
-    /// `argIndices` is allowed to have duplicates and can be in any order.
-    void eraseArguments(ArrayRef<unsigned> argIndices) {
-      unsigned originalNumArgs = $_op.getNumArguments();
-      Type newType = $_op.getTypeWithoutArgsAndResults(argIndices, {});
-      function_interface_impl::eraseFunctionArguments(this->getOperation(), argIndices,
-                                                originalNumArgs, newType);
+    void eraseArguments(const BitVector &argIndices) {
+      Type newType = $_op.getTypeWithoutArgs(argIndices);
+      function_interface_impl::eraseFunctionArguments(
+        this->getOperation(), argIndices, newType);
     }
 
     /// Erase a single result at `resultIndex`.
-    void eraseResult(unsigned resultIndex) { eraseResults({resultIndex}); }
+    void eraseResult(unsigned resultIndex) {
+      BitVector resultsToErase($_op.getNumResults());
+      resultsToErase.set(resultIndex);
+      eraseResults(resultsToErase);
+    }
 
     /// Erases the results listed in `resultIndices`.
-    /// `resultIndices` is allowed to have duplicates and can be in any order.
-    void eraseResults(ArrayRef<unsigned> resultIndices) {
-      unsigned originalNumResults = $_op.getNumResults();
-      Type newType = $_op.getTypeWithoutArgsAndResults({}, resultIndices);
+    void eraseResults(const BitVector &resultIndices) {
+      Type newType = $_op.getTypeWithoutResults(resultIndices);
       function_interface_impl::eraseFunctionResults(
-          this->getOperation(), resultIndices, originalNumResults, newType);
+          this->getOperation(), resultIndices, newType);
     }
 
     /// Return the type of this function with the specified arguments and
@@ -320,16 +375,27 @@ def FunctionOpInterface : OpInterface<"FunctionOpInterface"> {
 
     /// Return the type of this function without the specified arguments and
     /// results. This is used to update the function's signature in the
-    /// `eraseArguments` and `eraseResults` methods. The arrays of indices are
-    /// allowed to have duplicates and can be in any order.
+    /// `eraseArguments` and `eraseResults` methods.
     Type getTypeWithoutArgsAndResults(
-      ArrayRef<unsigned> argIndices, ArrayRef<unsigned> resultIndices) {
+      const BitVector &argIndices, const BitVector &resultIndices) {
       SmallVector<Type> argStorage, resultStorage;
       TypeRange newArgTypes = function_interface_impl::filterTypesOut(
           $_op.getArgumentTypes(), argIndices, argStorage);
       TypeRange newResultTypes = function_interface_impl::filterTypesOut(
           $_op.getResultTypes(), resultIndices, resultStorage);
       return $_op.cloneTypeWith(newArgTypes, newResultTypes);
+    }
+    Type getTypeWithoutArgs(const BitVector &argIndices) {
+      SmallVector<Type> argStorage;
+      TypeRange newArgTypes = function_interface_impl::filterTypesOut(
+          $_op.getArgumentTypes(), argIndices, argStorage);
+      return $_op.cloneTypeWith(newArgTypes, $_op.getResultTypes());
+    }
+    Type getTypeWithoutResults(const BitVector &resultIndices) {
+      SmallVector<Type> resultStorage;
+      TypeRange newResultTypes = function_interface_impl::filterTypesOut(
+          $_op.getResultTypes(), resultIndices, resultStorage);
+      return $_op.cloneTypeWith($_op.getArgumentTypes(), newResultTypes);
     }
 
     //===------------------------------------------------------------------===//

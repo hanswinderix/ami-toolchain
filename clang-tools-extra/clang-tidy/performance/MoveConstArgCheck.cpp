@@ -37,6 +37,7 @@ static void replaceCallWithArg(const CallExpr *Call, DiagnosticBuilder &Diag,
 
 void MoveConstArgCheck::storeOptions(ClangTidyOptions::OptionMap &Opts) {
   Options.store(Opts, "CheckTriviallyCopyableMove", CheckTriviallyCopyableMove);
+  Options.store(Opts, "CheckMoveToConstRef", CheckMoveToConstRef);
 }
 
 void MoveConstArgCheck::registerMatchers(MatchFinder *Finder) {
@@ -68,9 +69,9 @@ void MoveConstArgCheck::registerMatchers(MatchFinder *Finder) {
 }
 
 bool IsRValueReferenceParam(const Expr *Invocation,
-                            const QualType &InvocationParmType,
+                            const QualType *InvocationParmType,
                             const Expr *Arg) {
-  if (Invocation && InvocationParmType->isRValueReferenceType() &&
+  if (Invocation && (*InvocationParmType)->isRValueReferenceType() &&
       Arg->isLValue()) {
     if (!Invocation->getType()->isRecordType())
       return true;
@@ -138,7 +139,7 @@ void MoveConstArgCheck::check(const MatchFinder::MatchResult &Result) {
     // std::move shouldn't be removed when an lvalue wrapped by std::move is
     // passed to the function with an rvalue reference parameter.
     bool IsRVRefParam =
-        IsRValueReferenceParam(ReceivingExpr, *InvocationParmType, Arg);
+        IsRValueReferenceParam(ReceivingExpr, InvocationParmType, Arg);
     const auto *Var =
         IsVariable ? dyn_cast<DeclRefExpr>(Arg)->getDecl() : nullptr;
 
@@ -193,7 +194,7 @@ void MoveConstArgCheck::check(const MatchFinder::MatchResult &Result) {
           << (InvocationParm->getFunctionScopeIndex() + 1) << FunctionName
           << *InvocationParmType << ExpectParmTypeName;
     }
-  } else if (ReceivingExpr) {
+  } else if (ReceivingExpr && CheckMoveToConstRef) {
     if ((*InvocationParmType)->isRValueReferenceType())
       return;
 

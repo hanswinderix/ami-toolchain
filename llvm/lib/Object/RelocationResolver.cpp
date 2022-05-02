@@ -11,6 +11,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Object/RelocationResolver.h"
+#include "llvm/ADT/Triple.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/BinaryFormat/COFF.h"
+#include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MachO.h"
+#include "llvm/BinaryFormat/Wasm.h"
+#include "llvm/Object/ELFObjectFile.h"
+#include "llvm/Object/ELFTypes.h"
+#include "llvm/Object/ObjectFile.h"
+#include "llvm/Object/SymbolicFile.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/ErrorHandling.h"
+#include <cassert>
+#include <vector>
 
 namespace llvm {
 namespace object {
@@ -63,6 +78,7 @@ static bool supportsAArch64(uint64_t Type) {
   switch (Type) {
   case ELF::R_AARCH64_ABS32:
   case ELF::R_AARCH64_ABS64:
+  case ELF::R_AARCH64_PREL16:
   case ELF::R_AARCH64_PREL32:
   case ELF::R_AARCH64_PREL64:
     return true;
@@ -78,6 +94,8 @@ static uint64_t resolveAArch64(uint64_t Type, uint64_t Offset, uint64_t S,
     return (S + Addend) & 0xFFFFFFFF;
   case ELF::R_AARCH64_ABS64:
     return S + Addend;
+  case ELF::R_AARCH64_PREL16:
+    return (S + Addend - Offset) & 0xFFFF;
   case ELF::R_AARCH64_PREL32:
     return (S + Addend - Offset) & 0xFFFFFFFF;
   case ELF::R_AARCH64_PREL64:

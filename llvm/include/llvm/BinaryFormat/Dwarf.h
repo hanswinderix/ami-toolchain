@@ -19,7 +19,6 @@
 #ifndef LLVM_BINARYFORMAT_DWARF_H
 #define LLVM_BINARYFORMAT_DWARF_H
 
-#include "llvm/ADT/Optional.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -31,8 +30,10 @@
 
 namespace llvm {
 class StringRef;
+template<typename T> class Optional;
 
 namespace dwarf {
+
 
 //===----------------------------------------------------------------------===//
 // DWARF constants as gleaned from the DWARF Debugging Information Format V.5
@@ -317,6 +318,10 @@ inline bool isFortran(SourceLanguage S) {
   }
 
   return result;
+}
+
+inline TypeKind getArrayIndexTypeEncoding(SourceLanguage S) {
+  return isFortran(S) ? DW_ATE_signed : DW_ATE_unsigned;
 }
 
 enum CaseSensitivity {

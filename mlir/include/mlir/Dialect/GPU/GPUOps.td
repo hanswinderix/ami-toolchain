@@ -15,7 +15,6 @@
 
 include "mlir/Dialect/DLTI/DLTIBase.td"
 include "mlir/Dialect/GPU/GPUBase.td"
-include "mlir/Dialect/LLVMIR/LLVMOpBase.td"
 include "mlir/IR/EnumAttr.td"
 include "mlir/IR/FunctionInterfaces.td"
 include "mlir/IR/SymbolInterfaces.td"
@@ -27,7 +26,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 // GPU Dialect operations.
 //===----------------------------------------------------------------------===//
 
-class GPU_Op<string mnemonic, list<OpTrait> traits = []> :
+class GPU_Op<string mnemonic, list<Trait> traits = []> :
     Op<GPU_Dialect, mnemonic, traits>;
 
 def GPU_Dimension : I32EnumAttr<"Dimension",
@@ -42,7 +41,7 @@ def GPU_Dimension : I32EnumAttr<"Dimension",
 }
 def GPU_DimensionAttr : EnumAttr<GPU_Dialect, GPU_Dimension, "dim">;
 
-class GPU_IndexOp<string mnemonic, list<OpTrait> traits = []> :
+class GPU_IndexOp<string mnemonic, list<Trait> traits = []> :
     GPU_Op<mnemonic, !listconcat(traits, [NoSideEffect])>,
     Arguments<(ins GPU_DimensionAttr:$dimension)>, Results<(outs Index)> {
   let assemblyFormat = "$dimension attr-dict";
@@ -97,6 +96,19 @@ def GPU_ThreadIdOp : GPU_IndexOp<"thread_id"> {
   }];
 }
 
+def GPU_LaneIdOp : GPU_Op<"lane_id", [NoSideEffect]> {
+  let description = [{
+    Returns the lane id within the subgroup (warp/wave).
+
+    Example:
+    ```mlir
+    %laneId = gpu.lane_id
+    ```
+  }];
+  let results = (outs Index:$result);
+  let assemblyFormat = "attr-dict";
+}
+
 def GPU_SubgroupIdOp : GPU_Op<"subgroup_id", [NoSideEffect]>,
     Arguments<(ins)>, Results<(outs Index:$result)> {
   let description = [{
@@ -111,8 +123,22 @@ def GPU_SubgroupIdOp : GPU_Op<"subgroup_id", [NoSideEffect]>,
   }];
 
   let assemblyFormat = "attr-dict `:` type($result)";
-  let verifier = [{ return success(); }];
 }
+
+def GPU_GlobalIdOp : GPU_IndexOp<"global_id"> {
+  let description = [{
+    Returns the unique global workitem/thread id, i.e., the unique index of the
+    current workitem/thread within all workgroups / grid along the x, y, or z
+    `dimension`.
+
+    Example:
+
+    ```mlir
+    %gidX = gpu.global_id x
+    ```
+  }];
+}
+
 
 def GPU_NumSubgroupsOp : GPU_Op<"num_subgroups", [NoSideEffect]>,
     Arguments<(ins)>, Results<(outs Index:$result)> {
@@ -127,7 +153,6 @@ def GPU_NumSubgroupsOp : GPU_Op<"num_subgroups", [NoSideEffect]>,
   }];
 
   let assemblyFormat = "attr-dict `:` type($result)";
-  let verifier = [{ return success(); }];
 }
 
 def GPU_SubgroupSizeOp : GPU_Op<"subgroup_size", [NoSideEffect]>,
@@ -143,7 +168,6 @@ def GPU_SubgroupSizeOp : GPU_Op<"subgroup_size", [NoSideEffect]>,
   }];
 
   let assemblyFormat = "attr-dict `:` type($result)";
-  let verifier = [{ return success(); }];
 }
 
 def GPU_GPUFuncOp : GPU_Op<"func", [
@@ -210,6 +234,7 @@ def GPU_GPUFuncOp : GPU_Op<"func", [
     attribution.
   }];
 
+  let arguments = (ins TypeAttrOf<FunctionType>:$function_type);
   let regions = (region AnyRegion:$body);
 
   let skipDefaultBuilders = 1;
@@ -239,7 +264,7 @@ def GPU_GPUFuncOp : GPU_Op<"func", [
     /// the workgroup memory
     ArrayRef<BlockArgument> getWorkgroupAttributions() {
       auto begin =
-          std::next(getBody().args_begin(), getType().getNumInputs());
+          std::next(getBody().args_begin(), getFunctionType().getNumInputs());
       auto end = std::next(begin, getNumWorkgroupAttributions());
       return {begin, end};
     }
@@ -250,7 +275,7 @@ def GPU_GPUFuncOp : GPU_Op<"func", [
 
     /// Returns the number of buffers located in the private memory.
     unsigned getNumPrivateAttributions() {
-      return getBody().getNumArguments() - getType().getNumInputs() -
+      return getBody().getNumArguments() - getFunctionType().getNumInputs() -
           getNumWorkgroupAttributions();
     }
 
@@ -261,7 +286,7 @@ def GPU_GPUFuncOp : GPU_Op<"func", [
       // memory.
       auto begin =
           std::next(getBody().args_begin(),
-                    getType().getNumInputs() + getNumWorkgroupAttributions());
+                    getFunctionType().getNumInputs() + getNumWorkgroupAttributions());
       return {begin, getBody().args_end()};
     }
 
@@ -276,16 +301,14 @@ def GPU_GPUFuncOp : GPU_Op<"func", [
     }
 
     /// Returns the type of this function.
-    /// FIXME: We should drive this via the ODS `type` param.
-    FunctionType getType() { 
-      return getTypeAttr().getValue().cast<FunctionType>();
-    }
+    /// FIXME: Remove when GPU uses prefixed accessors.
+    FunctionType getFunctionType() { return function_type(); }
 
     /// Returns the argument types of this function.
-    ArrayRef<Type> getArgumentTypes() { return getType().getInputs(); }
+    ArrayRef<Type> getArgumentTypes() { return getFunctionType().getInputs(); }
 
     /// Returns the result types of this function.
-    ArrayRef<Type> getResultTypes() { return getType().getResults(); }
+    ArrayRef<Type> getResultTypes() { return getFunctionType().getResults(); }
 
     /// Returns the keywords used in the custom syntax for this Op.
     static StringRef getWorkgroupKeyword() { return "workgroup"; }
@@ -298,10 +321,7 @@ def GPU_GPUFuncOp : GPU_Op<"func", [
     /// Verifies the body of the function.
     LogicalResult verifyBody();
   }];
-
-  // let verifier = [{ return ::verifFuncOpy(*this); }];
-  let printer = [{ printGPUFuncOp(p, *this); }];
-  let parser = [{ return parseGPUFuncOp(parser, result); }];
+  let hasCustomAssemblyFormat = 1;
 }
 
 def GPU_LaunchFuncOp : GPU_Op<"launch_func",
@@ -353,7 +373,7 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func",
 
       // This module creates a separate compilation unit for the GPU compiler.
       gpu.module @kernels {
-        func @kernel_1(%arg0 : f32, %arg1 : memref<?xf32, 1>)
+        func.func @kernel_1(%arg0 : f32, %arg1 : memref<?xf32, 1>)
             attributes { nvvm.kernel = true } {
 
           // Operations that produce block/thread IDs and dimensions are
@@ -400,7 +420,9 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func",
   let builders = [
     OpBuilder<(ins "GPUFuncOp":$kernelFunc, "KernelDim3":$gridSize,
       "KernelDim3":$blockSize, "Value":$dynamicSharedMemorySize,
-      "ValueRange":$kernelOperands)>
+      "ValueRange":$kernelOperands,
+      CArg<"Type", "nullptr">:$asyncTokenType,
+      CArg<"ValueRange", "{}">:$asyncDependencies)>
   ];
 
   let extraClassDeclaration = [{
@@ -435,7 +457,6 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func",
     static StringRef getKernelAttrName() { return "kernel"; }
   }];
 
-  let verifier = [{ return ::verify(*this); }];
   let assemblyFormat = [{
       custom<AsyncDependencies>(type($asyncToken), $asyncDependencies)
       $kernel
@@ -444,27 +465,35 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func",
       (`dynamic_shared_memory_size` $dynamicSharedMemorySize^)?
       custom<LaunchFuncOperands>($operands, type($operands)) attr-dict
   }];
+  let hasVerifier = 1;
 }
 
-def GPU_LaunchOp : GPU_Op<"launch">,
-    Arguments<(ins Index:$gridSizeX, Index:$gridSizeY, Index:$gridSizeZ,
+def GPU_LaunchOp : GPU_Op<"launch",
+    [AutomaticAllocationScope, AttrSizedOperandSegments, GPU_AsyncOpInterface]>,
+    Arguments<(ins Variadic<GPU_AsyncToken>:$asyncDependencies,
+               Index:$gridSizeX, Index:$gridSizeY, Index:$gridSizeZ,
                Index:$blockSizeX, Index:$blockSizeY, Index:$blockSizeZ,
                Optional<I32>:$dynamicSharedMemorySize)>,
-    Results<(outs)> {
+    Results<(outs Optional<GPU_AsyncToken>:$asyncToken)> {
   let summary = "GPU kernel launch operation";
 
   let description = [{
     Launch a kernel on the specified grid of thread blocks. The body of the
     kernel is defined by the single region that this operation contains. The
-    operation takes six operands followed by an optional operand: the first
-    three operands are grid sizes along the x,y,z dimensions and the following
-    three are block sizes along the x,y,z dimensions. The last operand is
-    optional and corresponds to the amount of dynamic shared memory a kernel's
-    workgroup should be allocated; when this operand is not present, a zero size
-    is assumed.
+    operation takes an optional list of async dependencies followed by six
+    operands and an optional operand.
 
-    When a lower-dimensional kernel is required, unused sizes must
-    be explicitly set to `1`.
+    The `async` keyword indicates the kernel should be launched asynchronously;
+    the operation returns a new !gpu.async.token when the keyword is specified.
+    The kernel launched does not start executing until the ops producing its
+    async dependencies (optional operands) have completed.
+
+    The first three operands (following any async dependencies) are grid sizes
+    along the x,y,z dimensions and the following three are block sizes along the
+    x,y,z dimensions. When a lower-dimensional kernel is required, unused sizes
+    must be explicitly set to `1`.  The last operand is optional and corresponds
+    to the amount of dynamic shared memory a kernel's workgroup should be
+    allocated; when this operand is not present, a zero size is assumed.
 
     The body region has _twelve_ arguments, grouped as follows:
 
@@ -476,7 +505,8 @@ def GPU_LaunchOp : GPU_Op<"launch">,
     Syntax:
 
     ```
-    operation ::= `gpu.launch` `block` `(` ssa-id-list `)` `in` ssa-reassignment
+    operation ::= `gpu.launch` (`async` (`[` ssa-id-list `]`)? )?
+                             `block` `(` ssa-id-list `)` `in` ssa-reassignment
                              `threads` `(` ssa-id-list `)` `in` ssa-reassignment
                              (dynamic_shared_memory_size ssa-use)?
                              region attr-dict?
@@ -528,7 +558,9 @@ def GPU_LaunchOp : GPU_Op<"launch">,
     OpBuilder<(ins "Value":$gridSizeX, "Value":$gridSizeY,
       "Value":$gridSizeZ, "Value":$blockSizeX, "Value":$blockSizeY,
       "Value":$blockSizeZ,
-      CArg<"Value", "nullptr">:$dynamic_shared_memory_size)>
+      CArg<"Value", "nullptr">:$dynamicSharedMemorySize,
+      CArg<"Type", "nullptr">:$asyncTokenType,
+      CArg<"ValueRange", "{}">:$asyncDependencies)>
   ];
 
   let extraClassDeclaration = [{
@@ -561,10 +593,9 @@ def GPU_LaunchOp : GPU_Op<"launch">,
     static constexpr unsigned kNumConfigRegionAttributes = 12;
   }];
 
-  let parser = [{ return parseLaunchOp(parser, result); }];
-  let printer = [{ printLaunchOp(p, *this); }];
-  let verifier = [{ return ::verify(*this); }];
   let hasCanonicalizer = 1;
+  let hasCustomAssemblyFormat = 1;
+  let hasRegionVerifier = 1;
 }
 
 def GPU_PrintfOp : GPU_Op<"printf", [MemoryEffects<[MemWrite]>]>,
@@ -596,7 +627,7 @@ def GPU_ReturnOp : GPU_Op<"return", [HasParent<"GPUFuncOp">, NoSideEffect,
   let builders = [OpBuilder<(ins), [{ // empty}]>];
 
   let assemblyFormat = "attr-dict ($operands^ `:` type($operands))?";
-  let verifier = [{ return ::verify(*this); }];
+  let hasVerifier = 1;
 }
 
 def GPU_TerminatorOp : GPU_Op<"terminator", [HasParent<"LaunchOp">,
@@ -683,9 +714,9 @@ def GPU_AllReduceOp : GPU_Op<"all_reduce",
     in convergence.
   }];
   let regions = (region AnyRegion:$body);
-  let verifier = [{ return ::verifyAllReduce(*this); }];
   let assemblyFormat = [{ custom<AllReduceOperation>($op) $value $body attr-dict
                           `:` functional-type(operands, results) }];
+  let hasRegionVerifier = 1;
 }
 
 def GPU_ShuffleOpXor  : I32EnumAttrCase<"XOR",  0, "xor">;
@@ -732,6 +763,11 @@ def GPU_ShuffleOp : GPU_Op<
     in the shuffle. Exactly the first `width` invocations of a subgroup need to
     execute this op in convergence.
   }];
+  let builders = [
+    // Helper function that creates a shuffle with constant offset/width.
+    OpBuilder<(ins "Value":$value, "int32_t":$offset, "int32_t":$width,
+                   "ShuffleMode":$mode)>
+  ];
   let assemblyFormat = "$mode $value `,` $offset `,` $width attr-dict `:` type($value)";
 }
 
@@ -788,9 +824,8 @@ def GPU_GPUModuleOp : GPU_Op<"module", [
     ```
   }];
   let builders = [OpBuilder<(ins "StringRef":$name)>];
-  let parser = [{ return ::parseGPUModuleOp(parser, result); }];
-  let printer = [{ return ::print(p, *this); }];
   let regions = (region SizedRegion<1>:$body);
+  let hasCustomAssemblyFormat = 1;
 
   // We need to ensure the block inside the region is properly terminated;
   // the auto-generated builders do not guarantee that.
@@ -823,7 +858,6 @@ def GPU_HostRegisterOp : GPU_Op<"host_register">,
   }];
 
   let assemblyFormat = "$value attr-dict `:` type($value)";
-  let verifier = [{ return success(); }];
 }
 
 def GPU_WaitOp : GPU_Op<"wait", [GPU_AsyncOpInterface]> {
@@ -866,6 +900,8 @@ def GPU_WaitOp : GPU_Op<"wait", [GPU_AsyncOpInterface]> {
   let assemblyFormat = [{
     custom<AsyncDependencies>(type($asyncToken), $asyncDependencies) attr-dict
   }];
+
+  let hasCanonicalizer = 1;
 }
 
 def GPU_AllocOp : GPU_Op<"alloc", [
@@ -906,6 +942,7 @@ def GPU_AllocOp : GPU_Op<"alloc", [
     `(` $dynamicSizes `)` (`` `[` $symbolOperands^ `]`)? attr-dict `:` type($memref)
   }];
 
+  let hasVerifier = 1;
   let hasCanonicalizer = 1;
 }
 
@@ -972,8 +1009,8 @@ def GPU_MemcpyOp : GPU_Op<"memcpy", [GPU_AsyncOpInterface]> {
     custom<AsyncDependencies>(type($asyncToken), $asyncDependencies)
     $dst`,` $src `:` type($dst)`,` type($src) attr-dict
   }];
-  let verifier = [{ return ::verify(*this); }];
   let hasFolder = 1;
+  let hasVerifier = 1;
 }
 
 def GPU_MemsetOp : GPU_Op<"memset",
@@ -1007,9 +1044,19 @@ def GPU_MemsetOp : GPU_Op<"memset",
     custom<AsyncDependencies>(type($asyncToken), $asyncDependencies)
     $dst`,` $value `:` type($dst)`,` type($value) attr-dict
   }];
-  // MemsetOp is fully verified by traits.
-  let verifier = [{ return success(); }];
   let hasFolder = 1;
+}
+
+def GPU_SetDefaultDeviceOp : GPU_Op<"set_default_device",
+                                    [MemoryEffects<[MemWrite]>]>,
+    Arguments<(ins I32:$devIndex)> {
+  let summary = "Set default GPU for operations after this by index";
+  let description = [{
+    Operation that sets the current default GPU, using a zero-based index
+    into the set of GPUs on the system. The default GPU setting may be
+    thread-local.
+  }];
+  let assemblyFormat = "attr-dict $devIndex";
 }
 
 def GPU_SubgroupMmaLoadMatrixOp : GPU_Op<"subgroup_mma_load_matrix",
@@ -1049,8 +1096,7 @@ def GPU_SubgroupMmaLoadMatrixOp : GPU_Op<"subgroup_mma_load_matrix",
   let assemblyFormat = [{
     $srcMemref`[`$indices`]` attr-dict `:` type($srcMemref) `->` type($res)
   }];
-
-  let verifier = [{ return ::verify(*this); }];
+  let hasVerifier = 1;
 }
 
 def GPU_SubgroupMmaStoreMatrixOp : GPU_Op<"subgroup_mma_store_matrix",
@@ -1087,8 +1133,7 @@ def GPU_SubgroupMmaStoreMatrixOp : GPU_Op<"subgroup_mma_store_matrix",
   let assemblyFormat = [{
     $src`,` $dstMemref`[`$indices`]` attr-dict `:` type($src)`,` type($dstMemref)
   }];
-
-  let verifier = [{ return ::verify(*this); }];
+  let hasVerifier = 1;
 }
 
 def GPU_SubgroupMmaComputeOp : GPU_Op<"subgroup_mma_compute",
@@ -1126,8 +1171,7 @@ def GPU_SubgroupMmaComputeOp : GPU_Op<"subgroup_mma_compute",
   let assemblyFormat = [{
     $opA`,` $opB`,` $opC attr-dict `:` type($opA)`,` type($opB) `->` type($res)
   }];
-
-  let verifier = [{ return ::verify(*this); }];
+  let hasVerifier = 1;
 }
 
 def GPU_SubgroupMmaConstantMatrixOp : GPU_Op<"subgroup_mma_constant_matrix",
@@ -1233,6 +1277,107 @@ def GPU_SubgroupMmaElementwiseOp : GPU_Op<"subgroup_mma_elementwise",
 
   let assemblyFormat = [{
     $operation $args attr-dict `:` functional-type($args, $res)
+  }];
+}
+
+def GPU_DeviceAsyncCopyOp : GPU_Op<"device_async_copy",
+  [AttrSizedOperandSegments]> {
+  let summary = "device-side asynchronous copy";
+  let description = [{
+    The `gpu.device_async_copy` op initiates an asynchronous copy operation of
+    `$size` elements from source to the destination without blocking the thread.
+    The destination has to be in shared memory.
+
+    This is memory access will be pending to be added to a group.
+
+    This op is meant to be used with `gpu.device_async_create_group` and
+    `gpu.device_async_wait` to synchronize copies as explained in those ops
+    descriptions.
+
+    In order to do a copy and wait for the result we need the following
+    combination:
+    ```
+    // copy 1.
+    %cp1 = gpu.device_async_copy %A[%c0], %B[%c0], 4 :memref<16xf32> to memref<16xf32, 3>
+    // copy 2.
+    %cp2 = gpu.device_async_copy %C[%c0], %D[%c0], 4 : memref<16xf32> to memref<16xf32, 3>
+    // group 1 contains copy 1 and copy 2.
+    %token1 = gpu.device_async_create_group %cp1, %cp2
+    // copy 3.
+    %cp3 = gpu.device_async_copy %E[%c0], %F[%c0], 4 : memref<16xf32> to memref<16xf32, 3>
+    // group 2 contains copy 3.
+    %token2 = gpu.device_async_create_group %cp3
+    // after the wait copy 1 and copy 2 are complete.
+    gpu.device_async_wait %token1
+    // after the wait copy 3 is complete.
+    gpu.device_async_wait %token2
+    ```
+
+    Example:
+
+    ```mlir
+    %0 = gpu.device_async_copy %src[%c0, %c0], %dst[%c0, %c0, %c0], 4 :
+      memref<4x5xf32> to memref<2x7x5xf32, 3>
+    ```
+  }];
+  let results = (outs GPU_DeviceAsyncToken:$asyncToken);
+  let arguments = (ins Arg<AnyMemRef, "", [MemWrite]>:$dst,
+                       Variadic<Index>:$dstIndices,
+                       Arg<AnyMemRef, "", [MemRead]>:$src,
+                       Variadic<Index>:$srcIndices,
+                       IndexAttr:$numElements);
+  let assemblyFormat = [{
+    $src `[` $srcIndices `]` `,` $dst `[` $dstIndices `]` `,` $numElements
+      attr-dict `:` type($src) `to` type($dst)
+  }];
+  let hasVerifier = 1;
+}
+
+def GPU_DeviceAsyncCreateGroupOp : GPU_Op<"device_async_create_group", []> {
+  let summary = "device side asynchronous create group operation";
+  let description = [{
+  The `gpu.device_async_create_group` op creates a group of memory accesses
+  containing all the pending `device_async_copy` operations associated with
+  argument tokens. Each token can only be part of one group.
+
+  It returns a token that can be use to wait until the group fully completes.
+
+  This is meant to be used with `gpu.device_async_wait` to synchronize copies
+  as explained in those ops descriptions.
+
+  Groups are executed in the order they are created.
+
+  Example:
+
+  ```mlir
+  %0 = gpu.device_async_create_group
+  ```
+  }];
+  let results = (outs GPU_DeviceAsyncToken:$asyncToken);
+  let arguments = (ins Variadic<GPU_DeviceAsyncToken>:$inputTokens);
+  let assemblyFormat = [{
+    $inputTokens attr-dict
+  }];
+}
+
+def GPU_DeviceAsyncWaitOp : GPU_Op<"device_async_wait", []> {
+  let summary = "Wait for async gpu ops to complete.";
+  let description = [{
+  The `gpu.device_async_wait` op will block the execution thread until the group
+  associated with the source token is fully completed.
+
+    The optional `$numGroup` attribute gives a lower bound of the number of
+    groups uncompleted when the wait can unblock the thread.
+  Example:
+
+  ```mlir
+  gpu.device_async_wait %0
+  ```
+  }];
+  let arguments = (ins GPU_DeviceAsyncToken:$asyncDependencies,
+                       OptionalAttr<I32Attr>:$numGroups);
+  let assemblyFormat = [{
+    $asyncDependencies attr-dict
   }];
 }
 

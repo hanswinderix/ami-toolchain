@@ -1,24 +1,24 @@
-// RUN: mlir-opt %s -convert-linalg-to-loops -convert-scf-to-std -convert-linalg-to-llvm -lower-affine -convert-scf-to-std --convert-memref-to-llvm -convert-std-to-llvm -reconcile-unrealized-casts | \
+// RUN: mlir-opt %s -convert-linalg-to-loops -convert-scf-to-cf -convert-linalg-to-llvm -lower-affine -convert-scf-to-cf --convert-memref-to-llvm -convert-func-to-llvm -reconcile-unrealized-casts | \
 // RUN: mlir-cpu-runner -e main -entry-point-result=void \
 // RUN:   -shared-libs=%mlir_integration_test_dir/libmlir_runner_utils%shlibext \
 // RUN: | FileCheck %s
 
-// RUN: mlir-opt %s -linalg-tile="tile-sizes=0,5,5,5" -convert-linalg-to-loops -convert-scf-to-std \
-// RUN:   -convert-linalg-to-llvm -lower-affine -convert-scf-to-std --convert-memref-to-llvm -convert-std-to-llvm -reconcile-unrealized-casts | \
+// RUN: mlir-opt %s -linalg-tile="tile-sizes=0,5,5,5" -convert-linalg-to-loops -convert-scf-to-cf \
+// RUN:   -convert-linalg-to-llvm -lower-affine -convert-scf-to-cf --convert-memref-to-llvm -convert-func-to-llvm -reconcile-unrealized-casts | \
 // RUN: mlir-cpu-runner -e main -entry-point-result=void \
 // RUN:   -shared-libs=%mlir_integration_test_dir/libmlir_runner_utils%shlibext \
 // RUN: | FileCheck %s
 
-func private @print_memref_f32(memref<*xf32>)
+func.func private @print_memref_f32(memref<*xf32>)
 
 // Creates and returns 5-D buffer of size (%s1, %s2, %s3, %s4, %s5) filled with the value %f
-func @alloc_5d_filled_f32(%s1 : index, %s2 : index, %s3 : index, %s4 : index, %s5 : index, %f : f32) -> memref<?x?x?x?x?xf32> {
+func.func @alloc_5d_filled_f32(%s1 : index, %s2 : index, %s3 : index, %s4 : index, %s5 : index, %f : f32) -> memref<?x?x?x?x?xf32> {
   %buf = memref.alloc(%s1, %s2, %s3, %s4, %s5) : memref<?x?x?x?x?xf32>
-  linalg.fill(%f, %buf) : f32, memref<?x?x?x?x?xf32>
+  linalg.fill ins(%f : f32) outs(%buf : memref<?x?x?x?x?xf32>)
   return %buf : memref<?x?x?x?x?xf32>
 }
 
-func @conv_3d_ndhwc_dhwcf(%arg0: memref<?x?x?x?x?xf32>, %arg1: memref<?x?x?x?x?xf32>, %arg2: memref<?x?x?x?x?xf32>) {
+func.func @conv_3d_ndhwc_dhwcf(%arg0: memref<?x?x?x?x?xf32>, %arg1: memref<?x?x?x?x?xf32>, %arg2: memref<?x?x?x?x?xf32>) {
   linalg.conv_3d_ndhwc_dhwcf {dilations = dense<1> : tensor<3xi64>,
                            strides = dense<1> : tensor<3xi64>}
      ins (%arg0, %arg1: memref<?x?x?x?x?xf32>, memref<?x?x?x?x?xf32>)
@@ -27,7 +27,7 @@ func @conv_3d_ndhwc_dhwcf(%arg0: memref<?x?x?x?x?xf32>, %arg1: memref<?x?x?x?x?x
 }
 
 
-func @main() {
+func.func @main() {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c3 = arith.constant 3 : index

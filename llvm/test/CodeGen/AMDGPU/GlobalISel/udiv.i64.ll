@@ -194,14 +194,11 @@ define amdgpu_ps i64 @s_udiv_i64(i64 inreg %num, i64 inreg %den) {
 ; CHECK-NEXT:    v_mov_b32_e32 v1, s3
 ; CHECK-NEXT:    v_cvt_f32_u32_e32 v2, s3
 ; CHECK-NEXT:    s_sub_u32 s4, 0, s2
-; CHECK-NEXT:    s_cselect_b32 s5, 1, 0
 ; CHECK-NEXT:    v_mov_b32_e32 v3, s1
 ; CHECK-NEXT:    v_mac_f32_e32 v0, 0x4f800000, v2
-; CHECK-NEXT:    s_and_b32 s5, s5, 1
+; CHECK-NEXT:    s_subb_u32 s5, 0, s3
 ; CHECK-NEXT:    v_rcp_iflag_f32_e32 v0, v0
 ; CHECK-NEXT:    v_mul_f32_e32 v0, 0x5f7ffffc, v0
-; CHECK-NEXT:    s_cmp_lg_u32 s5, 0
-; CHECK-NEXT:    s_subb_u32 s5, 0, s3
 ; CHECK-NEXT:    v_mul_f32_e32 v2, 0x2f800000, v0
 ; CHECK-NEXT:    v_trunc_f32_e32 v2, v2
 ; CHECK-NEXT:    v_mac_f32_e32 v0, 0xcf800000, v2
@@ -759,7 +756,7 @@ define <2 x i64> @v_udiv_v2i64(<2 x i64> %num, <2 x i64> %den) {
 ; CGP-NEXT:    v_cndmask_b32_e32 v1, v1, v3, vcc
 ; CGP-NEXT:    ; implicit-def: $vgpr4
 ; CGP-NEXT:    ; implicit-def: $vgpr10
-; CGP-NEXT:  .LBB2_2: ; %Flow2
+; CGP-NEXT:  .LBB2_2: ; %Flow1
 ; CGP-NEXT:    s_or_saveexec_b64 s[6:7], s[6:7]
 ; CGP-NEXT:    s_xor_b64 exec, exec, s[6:7]
 ; CGP-NEXT:    s_cbranch_execz .LBB2_4
@@ -1641,7 +1638,7 @@ define <2 x i64> @v_udiv_v2i64_pow2_shl_denom(<2 x i64> %x, <2 x i64> %y) {
 ; CGP-NEXT:    v_cndmask_b32_e32 v1, v1, v3, vcc
 ; CGP-NEXT:    ; implicit-def: $vgpr2_vgpr3
 ; CGP-NEXT:    ; implicit-def: $vgpr8
-; CGP-NEXT:  .LBB8_2: ; %Flow2
+; CGP-NEXT:  .LBB8_2: ; %Flow1
 ; CGP-NEXT:    s_or_saveexec_b64 s[8:9], s[8:9]
 ; CGP-NEXT:    v_lshl_b64 v[9:10], s[6:7], v6
 ; CGP-NEXT:    s_xor_b64 exec, exec, s[8:9]

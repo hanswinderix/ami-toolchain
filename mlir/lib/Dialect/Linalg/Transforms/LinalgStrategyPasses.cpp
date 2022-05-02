@@ -16,6 +16,8 @@
 #include "PassDetail.h"
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
+#include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Linalg/Transforms/Hoisting.h"
@@ -23,15 +25,14 @@
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/SCF/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Vector/VectorTransforms.h"
+#include "mlir/Dialect/Vector/Transforms/VectorTransforms.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "mlir/Transforms/LoopUtils.h"
+#include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/Utils.h"
 
 using namespace mlir;
 using namespace mlir::vector;
@@ -100,7 +101,7 @@ struct LinalgStrategyTilePass
                                              filter);
     else
       tilingPattern.add<LinalgTilingPattern>(ctx, options, filter);
-    if (anchorOpName == linalg::PadTensorOp::getOperationName())
+    if (anchorOpName == tensor::PadOp::getOperationName())
       populatePadTensorTilingPatterns(tilingPattern, options);
     (void)applyPatternsAndFoldGreedily(funcOp, std::move(tilingPattern));
   }
@@ -302,12 +303,12 @@ struct LinalgStrategyVectorizePass
                                        std::move(vectorizationPatterns));
 
     // Apply the pad tensor op vectorization separately to avoid running the
-    // GenericPadTensorOpVectorizationPattern too early.
+    // GenericPadOpVectorizationPattern too early.
     // TODO: Improve once we have better infrastructure to control pattern
     // application.
     if (vectorizePadding) {
       RewritePatternSet patterns(funcOp.getContext());
-      linalg::populatePadTensorOpVectorizationPatterns(patterns);
+      linalg::populatePadOpVectorizationPatterns(patterns);
       (void)applyPatternsAndFoldGreedily(funcOp, std::move(patterns));
     }
   }
@@ -338,17 +339,18 @@ struct LinalgStrategyEnablePass
       return signalPassFailure();
 
     if (options.licm) {
-      if (funcOp
-              ->walk([&](LoopLikeOpInterface loopLike) {
-                if (failed(moveLoopInvariantCode(loopLike)))
-                  return WalkResult::interrupt();
-                return WalkResult::advance();
-              })
-              .wasInterrupted())
-        return signalPassFailure();
+      funcOp->walk([&](LoopLikeOpInterface loopLike) {
+        moveLoopInvariantCode(loopLike);
+      });
     }
 
-    promoteSingleIterationLoops(funcOp);
+    // Gathers all innermost loops through a post order pruned walk.
+    funcOp.walk([](Operation *op) {
+      if (auto forOp = dyn_cast<AffineForOp>(op))
+        (void)promoteIfSingleIteration(forOp);
+      else if (auto forOp = dyn_cast<scf::ForOp>(op))
+        (void)promoteIfSingleIteration(forOp);
+    });
     if (options.hoistRedundantVectorTransfers)
       hoistRedundantVectorTransfers(funcOp);
 
@@ -356,7 +358,7 @@ struct LinalgStrategyEnablePass
       hoistRedundantVectorTransfersOnTensor(funcOp);
 
     // Run CSE to cleanup after canonicalization.
-    OpPassManager dynamicPM("builtin.func");
+    OpPassManager dynamicPM("func.func");
     dynamicPM.addPass(createCSEPass());
     if (failed(runPipeline(dynamicPM, funcOp)))
       return signalPassFailure();
@@ -448,7 +450,7 @@ struct LinalgStrategyRemoveMarkersPass
 } // namespace
 
 /// Create a LinalgStrategyTileAndFusePass.
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLinalgStrategyTileAndFusePass(
     StringRef opName, const LinalgTilingAndFusionOptions &options,
     const LinalgTransformationFilter &filter) {
@@ -457,7 +459,7 @@ mlir::createLinalgStrategyTileAndFusePass(
 }
 
 /// Create a LinalgStrategyTilePass.
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLinalgStrategyTilePass(StringRef opName,
                                    const LinalgTilingOptions &opt,
                                    const LinalgTransformationFilter &filter) {
@@ -465,7 +467,7 @@ mlir::createLinalgStrategyTilePass(StringRef opName,
 }
 
 /// Create a LinalgStrategyPadPass.
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLinalgStrategyPadPass(StringRef opName,
                                   const LinalgPaddingOptions &opt,
                                   const LinalgTransformationFilter &filter) {
@@ -473,27 +475,30 @@ mlir::createLinalgStrategyPadPass(StringRef opName,
 }
 
 /// Create a LinalgStrategyPromotePass.
-std::unique_ptr<OperationPass<FuncOp>> mlir::createLinalgStrategyPromotePass(
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::createLinalgStrategyPromotePass(
     StringRef opName, const LinalgPromotionOptions &opt,
     const LinalgTransformationFilter &filter) {
   return std::make_unique<LinalgStrategyPromotePass>(opName, opt, filter);
 }
 
 /// Create a LinalgStrategyGeneralizePass.
-std::unique_ptr<OperationPass<FuncOp>> mlir::createLinalgStrategyGeneralizePass(
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::createLinalgStrategyGeneralizePass(
     StringRef opName, const LinalgTransformationFilter &filter) {
   return std::make_unique<LinalgStrategyGeneralizePass>(opName, filter);
 }
 
 /// Create a LinalgStrategyDecomposePass.
 // TODO: if/when we need finer control add an `opName` parameter.
-std::unique_ptr<OperationPass<FuncOp>> mlir::createLinalgStrategyDecomposePass(
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::createLinalgStrategyDecomposePass(
     const LinalgTransformationFilter &filter) {
   return std::make_unique<LinalgStrategyDecomposePass>(filter);
 }
 
 /// Create a LinalgStrategyInterchangePass.
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLinalgStrategyInterchangePass(
     ArrayRef<int64_t> iteratorInterchange,
     const LinalgTransformationFilter &filter) {
@@ -502,7 +507,8 @@ mlir::createLinalgStrategyInterchangePass(
 }
 
 /// Create a LinalgStrategyVectorizePass.
-std::unique_ptr<OperationPass<FuncOp>> mlir::createLinalgStrategyVectorizePass(
+std::unique_ptr<OperationPass<func::FuncOp>>
+mlir::createLinalgStrategyVectorizePass(
     StringRef opName, LinalgVectorizationOptions opt,
     const LinalgTransformationFilter &filter, bool padVectorize) {
   return std::make_unique<LinalgStrategyVectorizePass>(opName, opt, filter,
@@ -510,21 +516,21 @@ std::unique_ptr<OperationPass<FuncOp>> mlir::createLinalgStrategyVectorizePass(
 }
 
 /// Create a LinalgStrategyEnablePass.
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLinalgStrategyEnablePass(LinalgEnablingOptions opt,
                                      const LinalgTransformationFilter &filter) {
   return std::make_unique<LinalgStrategyEnablePass>(opt, filter);
 }
 
 /// Create a LinalgStrategyLowerVectorsPass.
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLinalgStrategyLowerVectorsPass(
     LinalgVectorLoweringOptions opt, const LinalgTransformationFilter &filter) {
   return std::make_unique<LinalgStrategyLowerVectorsPass>(opt, filter);
 }
 
 /// Create a LinalgStrategyRemoveMarkersPass.
-std::unique_ptr<OperationPass<FuncOp>>
+std::unique_ptr<OperationPass<func::FuncOp>>
 mlir::createLinalgStrategyRemoveMarkersPass() {
   return std::make_unique<LinalgStrategyRemoveMarkersPass>();
 }

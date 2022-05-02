@@ -26,6 +26,7 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/InitializePasses.h"
@@ -145,19 +146,19 @@ FunctionPass *llvm::createControlHeightReductionLegacyPass() {
 namespace {
 
 struct CHRStats {
-  CHRStats() : NumBranches(0), NumBranchesDelta(0),
-               WeightedNumBranchesDelta(0) {}
+  CHRStats() = default;
   void print(raw_ostream &OS) const {
     OS << "CHRStats: NumBranches " << NumBranches
        << " NumBranchesDelta " << NumBranchesDelta
        << " WeightedNumBranchesDelta " << WeightedNumBranchesDelta;
   }
-  uint64_t NumBranches;       // The original number of conditional branches /
-                              // selects
-  uint64_t NumBranchesDelta;  // The decrease of the number of conditional
-                              // branches / selects in the hot paths due to CHR.
-  uint64_t WeightedNumBranchesDelta; // NumBranchesDelta weighted by the profile
-                                     // count at the scope entry.
+  // The original number of conditional branches / selects
+  uint64_t NumBranches = 0;
+  // The decrease of the number of conditional branches / selects in the hot
+  // paths due to CHR.
+  uint64_t NumBranchesDelta = 0;
+  // NumBranchesDelta weighted by the profile count at the scope entry.
+  uint64_t WeightedNumBranchesDelta = 0;
 };
 
 // RegInfo - some properties of a Region.
@@ -769,9 +770,21 @@ CHRScope * CHR::findScope(Region *R) {
       return nullptr;
   // If any of the basic blocks have address taken, we must skip this region
   // because we cannot clone basic blocks that have address taken.
-  for (BasicBlock *BB : R->blocks())
+  for (BasicBlock *BB : R->blocks()) {
     if (BB->hasAddressTaken())
       return nullptr;
+    // If we encounter llvm.coro.id, skip this region because if the basic block
+    // is cloned, we end up inserting a token type PHI node to the block with
+    // llvm.coro.begin.
+    // FIXME: This could lead to less optimal codegen, because the region is
+    // excluded, it can prevent CHR from merging adjacent regions into bigger
+    // scope and hoisting more branches.
+    for (Instruction &I : *BB)
+      if (auto *II = dyn_cast<IntrinsicInst>(&I))
+        if (II->getIntrinsicID() == Intrinsic::coro_id)
+          return nullptr;
+  }
+
   if (Exit) {
     // Try to find an if-then block (check if R is an if-then).
     // if (cond) {
@@ -2080,7 +2093,7 @@ bool ControlHeightReductionLegacyPass::runOnFunction(Function &F) {
   RegionInfo &RI = getAnalysis<RegionInfoPass>().getRegionInfo();
   std::unique_ptr<OptimizationRemarkEmitter> OwnedORE =
       std::make_unique<OptimizationRemarkEmitter>(&F);
-  return CHR(F, BFI, DT, PSI, RI, *OwnedORE.get()).run();
+  return CHR(F, BFI, DT, PSI, RI, *OwnedORE).run();
 }
 
 namespace llvm {

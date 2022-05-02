@@ -6,7 +6,6 @@
 //===----------------------------------------------------------------------===//
 
 // UNSUPPORTED: c++03, c++11, c++14, c++17
-// UNSUPPORTED: libcpp-no-concepts
 // UNSUPPORTED: libcpp-has-no-incomplete-format
 
 // This test requires the dylib support introduced in D92214.
@@ -179,7 +178,7 @@ void test() {
   test<Context, long long, long long>(std::numeric_limits<long>::max());
   test<Context, long long, long long>(std::numeric_limits<long long>::max());
 
-#ifndef _LIBCPP_HAS_NO_INT128
+#ifndef TEST_HAS_NO_INT128
   test<Context, __int128_t, __int128_t>(std::numeric_limits<__int128_t>::min());
   test<Context, __int128_t, __int128_t>(std::numeric_limits<long long>::min());
   test<Context, __int128_t, __int128_t>(std::numeric_limits<long>::min());
@@ -240,7 +239,7 @@ void test() {
   test<Context, unsigned long long, unsigned long long>(
       std::numeric_limits<unsigned long long>::max());
 
-#ifndef _LIBCPP_HAS_NO_INT128
+#ifndef TEST_HAS_NO_INT128
   test<Context, __uint128_t, __uint128_t>(0);
   test<Context, __uint128_t, __uint128_t>(
       std::numeric_limits<unsigned char>::max());
@@ -346,6 +345,10 @@ void test() {
   // Test pointer types.
 
   test<Context, const void*>(nullptr);
+  int i = 0;
+  test<Context, const void*>(static_cast<void*>(&i));
+  const int ci = 0;
+  test<Context, const void*>(static_cast<const void*>(&ci));
 }
 
 void test() {

@@ -1,6 +1,6 @@
 // RUN: mlir-opt -test-linalg-pad-fusion -split-input-file %s | FileCheck %s
 
-func @dynamic_pad_fusion(%arg0 : tensor<?x?xf32>, %arg1 : index, %arg2 : index,
+func.func @dynamic_pad_fusion(%arg0 : tensor<?x?xf32>, %arg1 : index, %arg2 : index,
     %arg3 : index, %arg4 : index, %arg5 : f32) -> tensor<?x?xf32> {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -15,9 +15,9 @@ func @dynamic_pad_fusion(%arg0 : tensor<?x?xf32>, %arg1 : index, %arg2 : index,
       %1 = arith.mulf %arg6, %arg6 : f32
       linalg.yield %1 : f32
     } -> tensor<?x?xf32>
-  %1 = linalg.pad_tensor %0 low [%arg1, %arg2] high [%arg3, %arg4] {
+  %1 = tensor.pad %0 low [%arg1, %arg2] high [%arg3, %arg4] {
     ^bb0(%arg6: index, %arg7 : index):
-      linalg.yield %arg5 : f32
+      tensor.yield %arg5 : f32
     } : tensor<?x?xf32> to tensor<?x?xf32>
   return %1 : tensor<?x?xf32>
 }
@@ -38,7 +38,7 @@ func @dynamic_pad_fusion(%arg0 : tensor<?x?xf32>, %arg1 : index, %arg2 : index,
 //  CHECK-DAG:   %[[SOURCE_D1:.+]] = tensor.dim %[[SOURCE]], %[[C1]]
 //  CHECK-DAG:   %[[TARGET_D1:.+]] = affine.apply #[[MAP]]()[%[[ARG2]], %[[ARG4]], %[[SOURCE_D1]]]
 //      CHECK:   %[[INIT:.+]] = linalg.init_tensor [%[[TARGET_D0]], %[[TARGET_D1]]] 
-//      CHECK:   %[[FILL:.+]] = linalg.fill(%[[ARG5]], %[[INIT]])
+//      CHECK:   %[[FILL:.+]] = linalg.fill ins(%[[ARG5]]{{.*}}outs(%[[INIT]]
 //  CHECK-DAG:   %[[SIZE_D0:.+]] = tensor.dim %[[SOURCE]], %[[C0]]
 //  CHECK-DAG:   %[[SIZE_D1:.+]] = tensor.dim %[[SOURCE]], %[[C1]]
 //      CHECK:   %[[SLICE:.+]] = tensor.extract_slice %[[FILL]]
@@ -51,7 +51,7 @@ func @dynamic_pad_fusion(%arg0 : tensor<?x?xf32>, %arg1 : index, %arg2 : index,
 
 // -----
 
-func @mixed_pad_fusion(%arg0 : tensor<?x42xf32>, %arg1 : index, %arg2 : index,
+func.func @mixed_pad_fusion(%arg0 : tensor<?x42xf32>, %arg1 : index, %arg2 : index,
     %arg3 : f32) -> tensor<49x?xf32> {
   %c0 = arith.constant 0 : index
   %d0 = tensor.dim %arg0, %c0 : tensor<?x42xf32>
@@ -64,9 +64,9 @@ func @mixed_pad_fusion(%arg0 : tensor<?x42xf32>, %arg1 : index, %arg2 : index,
       %1 = arith.mulf %arg4, %arg4 : f32
       linalg.yield %1 : f32
     } -> tensor<42x?xf32>
-  %1 = linalg.pad_tensor %0 low [3, %arg1] high [4, %arg2] {
+  %1 = tensor.pad %0 low [3, %arg1] high [4, %arg2] {
     ^bb0(%arg4: index, %arg5 : index):
-      linalg.yield %arg3 : f32
+      tensor.yield %arg3 : f32
     } : tensor<42x?xf32> to tensor<49x?xf32>
   return %1 : tensor<49x?xf32>
 }
@@ -82,7 +82,7 @@ func @mixed_pad_fusion(%arg0 : tensor<?x42xf32>, %arg1 : index, %arg2 : index,
 //  CHECK-DAG:   %[[SOURCE_D1:.+]] = tensor.dim %[[SOURCE]], %[[C1]]
 //  CHECK-DAG:   %[[TARGET_D1:.+]] = affine.apply #[[MAP]]()[%[[ARG1]], %[[ARG2]], %[[SOURCE_D1]]]
 //      CHECK:   %[[INIT:.+]] = linalg.init_tensor [49, %[[TARGET_D1]]] 
-//      CHECK:   %[[FILL:.+]] = linalg.fill(%[[ARG3]], %[[INIT]])
+//      CHECK:   %[[FILL:.+]] = linalg.fill ins(%[[ARG3]]{{.*}}outs(%[[INIT]]
 //  CHECK-DAG:   %[[SIZE_D1:.+]] = tensor.dim %[[SOURCE]], %[[C1]]
 //      CHECK:   %[[SLICE:.+]] = tensor.extract_slice %[[FILL]]
 // CHECK-SAME:       [3, %[[ARG1]]] [42, %[[SIZE_D1]]] [1, 1]

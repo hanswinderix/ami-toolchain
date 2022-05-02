@@ -1202,7 +1202,8 @@ InstructionCost ARMTTIImpl::getMemcpyCost(const Instruction *I) {
 
 InstructionCost ARMTTIImpl::getShuffleCost(TTI::ShuffleKind Kind,
                                            VectorType *Tp, ArrayRef<int> Mask,
-                                           int Index, VectorType *SubTp) {
+                                           int Index, VectorType *SubTp,
+                                           ArrayRef<const Value *> Args) {
   Kind = improveShuffleKindFromMask(Kind, Mask);
   if (ST->hasNEON()) {
     if (Kind == TTI::SK_Broadcast) {
@@ -1771,7 +1772,7 @@ ARMTTIImpl::getIntrinsicInstrCost(const IntrinsicCostAttributes &ICA,
 
 bool ARMTTIImpl::isLoweredToCall(const Function *F) {
   if (!F->isIntrinsic())
-    BaseT::isLoweredToCall(F);
+    return BaseT::isLoweredToCall(F);
 
   // Assume all Arm-specific intrinsics map to an instruction.
   if (F->getName().startswith("llvm.arm"))
@@ -2109,9 +2110,6 @@ static bool canTailPredicateLoop(Loop *L, LoopInfo *LI, ScalarEvolution &SE,
       }
 
       Type *T  = I.getType();
-      if (T->isPointerTy())
-        T = T->getPointerElementType();
-
       if (T->getScalarSizeInBits() > 32) {
         LLVM_DEBUG(dbgs() << "Unsupported Type: "; T->dump());
         return false;

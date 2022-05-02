@@ -9,7 +9,7 @@
 // RUN: | FileCheck %s
 
 // CHECK: [4, 5, 6, 7, 0, 1, 2, 3, 12, -1, -1, -1, 8]
-func @main() {
+func.func @main() {
   %arg = memref.alloc() : memref<13xf32>
   %dst = memref.cast %arg : memref<13xf32> to memref<?xf32>
   %one = arith.constant 1 : index
@@ -24,10 +24,10 @@ func @main() {
     %width = arith.index_cast %block_x : index to i32
     %offset = arith.constant 4 : i32
     %shfl, %valid = gpu.shuffle xor %val, %offset, %width : f32
-    cond_br %valid, ^bb1(%shfl : f32), ^bb0
+    cf.cond_br %valid, ^bb1(%shfl : f32), ^bb0
   ^bb0:
     %m1 = arith.constant -1.0 : f32
-    br ^bb1(%m1 : f32)
+    cf.br ^bb1(%m1 : f32)
   ^bb1(%value : f32):
     memref.store %value, %dst[%tx] : memref<?xf32>
     gpu.terminator
@@ -36,4 +36,4 @@ func @main() {
   return
 }
 
-func private @print_memref_f32(%ptr : memref<*xf32>)
+func.func private @print_memref_f32(%ptr : memref<*xf32>)

@@ -66,15 +66,18 @@ public:
   }
 
   ~AnnotatedLine() {
-    for (unsigned i = 0, e = Children.size(); i != e; ++i) {
-      delete Children[i];
-    }
+    for (AnnotatedLine *Child : Children)
+      delete Child;
     FormatToken *Current = First;
     while (Current) {
       Current->Children.clear();
       Current->Role.reset();
       Current = Current->Next;
     }
+  }
+
+  bool isComment() const {
+    return First && First->is(tok::comment) && !First->getNextNonComment();
   }
 
   /// \c true if this line starts with the given tokens in order, ignoring

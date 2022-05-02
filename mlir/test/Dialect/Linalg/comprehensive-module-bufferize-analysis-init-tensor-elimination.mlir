@@ -1,4 +1,4 @@
-// RUN: mlir-opt %s -linalg-comprehensive-module-bufferize="test-analysis-only allow-return-memref init-tensor-elimination" -split-input-file | FileCheck %s
+// RUN: mlir-opt %s -linalg-comprehensive-module-bufferize="test-analysis-only allow-return-allocs init-tensor-elimination" -split-input-file | FileCheck %s
 
 // -----
 
@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 // CHECK-LABEL: func @buffer_forwarding_conflict
-func @buffer_forwarding_conflict(%arg0: tensor<?xf32> {linalg.inplaceable = true}, %arg1: index) -> (tensor<?xf32>, tensor<?xf32>) {
+func.func @buffer_forwarding_conflict(%arg0: tensor<?xf32> {bufferization.writable = true}, %arg1: index) -> (tensor<?xf32>, tensor<?xf32>) {
   %cst = arith.constant 0.000000e+00 : f32
   //      CHECK: tensor.extract_slice
   // CHECK-SAME: {__inplace_operands_attr__ = ["false", "none"]
@@ -16,7 +16,7 @@ func @buffer_forwarding_conflict(%arg0: tensor<?xf32> {linalg.inplaceable = true
 
   //      CHECK: linalg.fill
   // CHECK-SAME: {__inplace_operands_attr__ = ["none", "true"]
-  %1 = linalg.fill(%cst, %0) : f32, tensor<?xf32> -> tensor<?xf32>
+  %1 = linalg.fill ins(%cst : f32) outs(%0 : tensor<?xf32>) -> tensor<?xf32>
 
   //      CHECK: tensor.insert_slice
   // CHECK-SAME: {__inplace_operands_attr__ = ["true", "false", "none"]
@@ -34,7 +34,7 @@ func @buffer_forwarding_conflict(%arg0: tensor<?xf32> {linalg.inplaceable = true
 // -----
 
 // CHECK-LABEL: func @buffer_forwarding_no_conflict
-func @buffer_forwarding_no_conflict(%arg0: tensor<?xf32> {linalg.inplaceable = true}, %arg1: index) -> (tensor<?xf32>, tensor<?xf32>) {
+func.func @buffer_forwarding_no_conflict(%arg0: tensor<?xf32> {bufferization.writable = true}, %arg1: index) -> (tensor<?xf32>, tensor<?xf32>) {
   %cst = arith.constant 0.000000e+00 : f32
   //      CHECK: tensor.extract_slice
   // CHECK-SAME: {__inplace_operands_attr__ = ["true", "none"]
@@ -43,7 +43,7 @@ func @buffer_forwarding_no_conflict(%arg0: tensor<?xf32> {linalg.inplaceable = t
 
   //      CHECK: linalg.fill
   // CHECK-SAME: {__inplace_operands_attr__ = ["none", "true"]
-  %1 = linalg.fill(%cst, %0) : f32, tensor<?xf32> -> tensor<?xf32>
+  %1 = linalg.fill ins(%cst : f32) outs(%0 : tensor<?xf32>) -> tensor<?xf32>
 
   //      CHECK: tensor.insert_slice
   // CHECK-SAME: {__inplace_operands_attr__ = ["true", "true", "none"]
