@@ -124,13 +124,9 @@ def lookupRISCVOpcodeByName : SearchIndex {
   let Key = [ "Name" ];
 }
 def OPC_LOAD      : RISCVOpcode<"LOAD",      0b0000011>;
-def OPC_PLOAD     : RISCVOpcode<"PLOAD",     0b0000010>;
 def OPC_LOAD_FP   : RISCVOpcode<"LOAD_FP",   0b0000111>;
 def OPC_MISC_MEM  : RISCVOpcode<"MISC_MEM",  0b0001111>;
 def OPC_OP_IMM    : RISCVOpcode<"OP_IMM",    0b0010011>;
-def OPC_OP_GIMM   : RISCVOpcode<"OP_GIMM",   0b0010000>;
-def OPC_OP_MIMM   : RISCVOpcode<"OP_MIMM",   0b0010001>;
-def OPC_OP_PIMM   : RISCVOpcode<"OP_PIMM",   0b0010010>;
 def OPC_AUIPC     : RISCVOpcode<"AUIPC",     0b0010111>;
 def OPC_OP_IMM_32 : RISCVOpcode<"OP_IMM_32", 0b0011011>;
 def OPC_STORE     : RISCVOpcode<"STORE",     0b0100011>;
@@ -146,13 +142,9 @@ def OPC_NMADD     : RISCVOpcode<"NMADD",     0b1001111>;
 def OPC_OP_FP     : RISCVOpcode<"OP_FP",     0b1010011>;
 def OPC_OP_V      : RISCVOpcode<"OP_V",      0b1010111>;
 def OPC_BRANCH    : RISCVOpcode<"BRANCH",    0b1100011>;
-def OPC_ABRANCH   : RISCVOpcode<"ABRANCH",   0b1100001>;
-def OPC_AJALR     : RISCVOpcode<"AJALR",     0b1100101>;
 def OPC_JALR      : RISCVOpcode<"JALR",      0b1100111>;
-def OPC_AJAL      : RISCVOpcode<"AJAL",      0b1101101>;
 def OPC_JAL       : RISCVOpcode<"JAL",       0b1101111>;
 def OPC_SYSTEM    : RISCVOpcode<"SYSTEM",    0b1110011>;
-def OPC_MARK      : RISCVOpcode<"MARK",      0b0001011>;
 
 class RVInst<dag outs, dag ins, string opcodestr, string argstr,
              list<dag> pattern, InstFormat format>
