@@ -31,6 +31,7 @@
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Lex/LiteralSupport.h"
+#include "clang/Lex/Preprocessor.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
@@ -1521,6 +1522,11 @@ const Attr *CallExpr::getUnusedResultAttr(const ASTContext &Ctx) const {
     if (const auto *A = TD->getAttr<WarnUnusedResultAttr>())
       return A;
 
+  for (const auto *TD = getCallReturnType(Ctx)->getAs<TypedefType>(); TD;
+       TD = TD->desugar()->getAs<TypedefType>())
+    if (const auto *A = TD->getDecl()->getAttr<WarnUnusedResultAttr>())
+      return A;
+
   // Otherwise, see if the callee is marked nodiscard and return that attribute
   // instead.
   const Decl *D = getCalleeDecl();
@@ -2189,7 +2195,8 @@ APValue SourceLocExpr::EvaluateInContext(const ASTContext &Ctx,
   switch (getIdentKind()) {
   case SourceLocExpr::File: {
     SmallString<256> Path(PLoc.getFilename());
-    Ctx.getLangOpts().remapPathPrefix(Path);
+    clang::Preprocessor::processPathForFileMacro(Path, Ctx.getLangOpts(),
+                                                 Ctx.getTargetInfo());
     return MakeStringLiteral(Path);
   }
   case SourceLocExpr::Function: {
@@ -2222,7 +2229,8 @@ APValue SourceLocExpr::EvaluateInContext(const ASTContext &Ctx,
       StringRef Name = F->getName();
       if (Name == "_M_file_name") {
         SmallString<256> Path(PLoc.getFilename());
-        Ctx.getLangOpts().remapPathPrefix(Path);
+        clang::Preprocessor::processPathForFileMacro(Path, Ctx.getLangOpts(),
+                                                     Ctx.getTargetInfo());
         Value.getStructField(F->getFieldIndex()) = MakeStringLiteral(Path);
       } else if (Name == "_M_function_name") {
         // Note: this emits the PrettyFunction name -- different than what
@@ -2457,8 +2465,12 @@ bool Expr::isReadIfDiscardedInCPlusPlus11() const {
   }
 
   // Objective-C++ extensions to the rule.
-  if (isa<PseudoObjectExpr>(E) || isa<ObjCIvarRefExpr>(E))
+  if (isa<ObjCIvarRefExpr>(E))
     return true;
+  if (const auto *POE = dyn_cast<PseudoObjectExpr>(E)) {
+    if (isa<ObjCPropertyRefExpr, ObjCSubscriptRefExpr>(POE->getSyntacticForm()))
+      return true;
+  }
 
   return false;
 }
@@ -2708,23 +2720,35 @@ bool Expr::isUnusedResultAWarning(const Expr *&WarnE, SourceLocation &Loc,
   }
 
   case ObjCPropertyRefExprClass:
+  case ObjCSubscriptRefExprClass:
     WarnE = this;
     Loc = getExprLoc();
     R1 = getSourceRange();
     return true;
 
   case PseudoObjectExprClass: {
-    const PseudoObjectExpr *PO = cast<PseudoObjectExpr>(this);
+    const auto *POE = cast<PseudoObjectExpr>(this);
 
-    // Only complain about things that have the form of a getter.
-    if (isa<UnaryOperator>(PO->getSyntacticForm()) ||
-        isa<BinaryOperator>(PO->getSyntacticForm()))
-      return false;
+    // For some syntactic forms, we should always warn.
+    if (isa<ObjCPropertyRefExpr, ObjCSubscriptRefExpr>(
+            POE->getSyntacticForm())) {
+      WarnE = this;
+      Loc = getExprLoc();
+      R1 = getSourceRange();
+      return true;
+    }
 
-    WarnE = this;
-    Loc = getExprLoc();
-    R1 = getSourceRange();
-    return true;
+    // For others, we should never warn.
+    if (auto *BO = dyn_cast<BinaryOperator>(POE->getSyntacticForm()))
+      if (BO->isAssignmentOp())
+        return false;
+    if (auto *UO = dyn_cast<UnaryOperator>(POE->getSyntacticForm()))
+      if (UO->isIncrementDecrementOp())
+        return false;
+
+    // Otherwise, warn if the result expression would warn.
+    const Expr *Result = POE->getResultExpr();
+    return Result && Result->isUnusedResultAWarning(WarnE, Loc, R1, R2, Ctx);
   }
 
   case StmtExprClass: {

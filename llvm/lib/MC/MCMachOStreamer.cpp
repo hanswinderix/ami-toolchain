@@ -131,6 +131,7 @@ public:
 
   void finalizeCGProfileEntry(const MCSymbolRefExpr *&SRE);
   void finalizeCGProfile();
+  void createAddrSigSection();
 };
 
 } // end anonymous namespace.
@@ -461,7 +462,7 @@ void MCMachOStreamer::emitZerofill(MCSection *Section, MCSymbol *Symbol,
             // section.
   }
 
-  PushSection();
+  pushSection();
   SwitchSection(Section);
 
   // The symbol may not be present, which only creates the section.
@@ -470,7 +471,7 @@ void MCMachOStreamer::emitZerofill(MCSection *Section, MCSymbol *Symbol,
     emitLabel(Symbol);
     emitZeros(Size);
   }
-  PopSection();
+  popSection();
 }
 
 // This should always be called with the thread local bss section.  Like the
@@ -530,6 +531,7 @@ void MCMachOStreamer::finishImpl() {
 
   finalizeCGProfile();
 
+  createAddrSigSection();
   this->MCObjectStreamer::finishImpl();
 }
 
@@ -579,4 +581,17 @@ MCStreamer *llvm::createMachOStreamer(MCContext &Context,
   if (RelaxAll)
     S->getAssembler().setRelaxAll(true);
   return S;
+}
+
+// Create the AddrSig section and first data fragment here as its layout needs
+// to be computed immediately after in order for it to be exported correctly.
+void MCMachOStreamer::createAddrSigSection() {
+  MCAssembler &Asm = getAssembler();
+  MCObjectWriter &writer = Asm.getWriter();
+  if (!writer.getEmitAddrsigSection())
+    return;
+  MCSection *AddrSigSection =
+      Asm.getContext().getObjectFileInfo()->getAddrSigSection();
+  Asm.registerSection(*AddrSigSection);
+  new MCDataFragment(AddrSigSection);
 }

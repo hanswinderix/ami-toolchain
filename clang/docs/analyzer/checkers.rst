@@ -947,9 +947,9 @@ Check the size argument passed into C string functions for common erroneous patt
      // warn: potential buffer overflow
  }
 
-.. _unix-cstrisng-NullArg:
+.. _unix-cstring-NullArg:
 
-unix.cstrisng.NullArg (C)
+unix.cstring.NullArg (C)
 """""""""""""""""""""""""
 Check for null pointers being passed as arguments to C string functions:
 ``strlen, strnlen, strcpy, strncpy, strcat, strncat, strcmp, strncmp, strcasecmp, strncasecmp``.
@@ -2466,7 +2466,7 @@ Here, ``ptr`` is the buffer, and its minimum size is ``size * nmemb``
 
     // Below we receive a warning because the 3rd parameter should be the
     // number of elements to read, not the size in bytes. This case is a known
-    // vulnerability described by the the ARR38-C SEI-CERT rule.
+    // vulnerability described by the ARR38-C SEI-CERT rule.
     fread(wbuf, size, nitems, file);
   }
 

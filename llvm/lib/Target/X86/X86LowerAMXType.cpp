@@ -703,6 +703,9 @@ class X86LowerAMXCast {
 
 public:
   X86LowerAMXCast(Function &F) : Func(F) {}
+  void combineCastStore(IntrinsicInst *Cast, StoreInst *ST);
+  void combineLoadCast(IntrinsicInst *Cast, LoadInst *LD);
+  bool combineLdSt(SmallVectorImpl<Instruction *> &Casts);
   bool combineAMXcast(TargetLibraryInfo *TLI);
   bool transformAMXCast(IntrinsicInst *AMXCast);
   bool transformAllAMXCast();
@@ -913,7 +916,7 @@ bool X86LowerAMXCast::optimizeAMXCastFromPhi(
 // -->
 // call void @llvm.x86.tilestored64.internal(i16 %row, i16 %col, i8* %p,
 //                                           i64 64, x86_amx %42)
-static void combineCastStore(IntrinsicInst *Cast, StoreInst *ST) {
+void X86LowerAMXCast::combineCastStore(IntrinsicInst *Cast, StoreInst *ST) {
   Value *Tile = Cast->getOperand(0);
   // TODO: If it is cast intrinsic or phi node, we can propagate the
   // shape information through def-use chain.
@@ -939,7 +942,7 @@ static void combineCastStore(IntrinsicInst *Cast, StoreInst *ST) {
 // -->
 // %66 = call x86_amx @llvm.x86.tileloadd64.internal(i16 %row, i16 %col,
 //                                                   i8* %p, i64 64)
-static void combineLoadCast(IntrinsicInst *Cast, LoadInst *LD) {
+void X86LowerAMXCast::combineLoadCast(IntrinsicInst *Cast, LoadInst *LD) {
   Value *Row = nullptr, *Col = nullptr;
   Use &U = *(Cast->use_begin());
   unsigned OpNo = U.getOperandNo();
@@ -961,10 +964,10 @@ static void combineLoadCast(IntrinsicInst *Cast, LoadInst *LD) {
   Cast->replaceAllUsesWith(NewInst);
 }
 
-static bool combineLdSt(SmallVectorImpl<Instruction *> &Casts) {
+bool X86LowerAMXCast::combineLdSt(SmallVectorImpl<Instruction *> &Casts) {
   bool Change = false;
   for (auto *Cast : Casts) {
-    IntrinsicInst *II = dyn_cast<IntrinsicInst>(Cast);
+    auto *II = cast<IntrinsicInst>(Cast);
     // %43 = call <256 x i32> @llvm.x86.cast.tile.to.vector(x86_amx %42)
     // store <256 x i32> %43, <256 x i32>* %p, align 64
     // -->
@@ -984,7 +987,7 @@ static bool combineLdSt(SmallVectorImpl<Instruction *> &Casts) {
         Store->eraseFromParent();
     } else { // x86_cast_vector_to_tile
       SmallVector<Instruction *, 2> DeadLoads;
-      LoadInst *Load = dyn_cast<LoadInst>(Cast->getOperand(0));
+      auto *Load = dyn_cast<LoadInst>(Cast->getOperand(0));
       if (!Load || !Load->hasOneUse())
         continue;
       // %65 = load <256 x i32>, <256 x i32>* %p, align 64

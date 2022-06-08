@@ -40,11 +40,9 @@ using namespace bolt;
 namespace opts {
 
 static cl::opt<bool>
-BasicAggregation("nl",
-  cl::desc("aggregate basic samples (without LBR info)"),
-  cl::init(false),
-  cl::ZeroOrMore,
-  cl::cat(AggregatorCategory));
+    BasicAggregation("nl",
+                     cl::desc("aggregate basic samples (without LBR info)"),
+                     cl::cat(AggregatorCategory));
 
 static cl::opt<bool>
 FilterMemProfile("filter-mem-profile",
@@ -66,12 +64,10 @@ IgnoreBuildID("ignore-build-id",
   cl::init(false),
   cl::cat(AggregatorCategory));
 
-static cl::opt<bool>
-IgnoreInterruptLBR("ignore-interrupt-lbr",
-  cl::desc("ignore kernel interrupt LBR that happens asynchronously"),
-  cl::init(true),
-  cl::ZeroOrMore,
-  cl::cat(AggregatorCategory));
+static cl::opt<bool> IgnoreInterruptLBR(
+    "ignore-interrupt-lbr",
+    cl::desc("ignore kernel interrupt LBR that happens asynchronously"),
+    cl::init(true), cl::cat(AggregatorCategory));
 
 static cl::opt<unsigned long long>
 MaxSamples("max-samples",
@@ -81,12 +77,9 @@ MaxSamples("max-samples",
   cl::Hidden,
   cl::cat(AggregatorCategory));
 
-static cl::opt<bool>
-ReadPreAggregated("pa",
-  cl::desc("skip perf and read data from a pre-aggregated file format"),
-  cl::init(false),
-  cl::ZeroOrMore,
-  cl::cat(AggregatorCategory));
+static cl::opt<bool> ReadPreAggregated(
+    "pa", cl::desc("skip perf and read data from a pre-aggregated file format"),
+    cl::cat(AggregatorCategory));
 
 static cl::opt<bool>
 TimeAggregator("time-aggr",
@@ -96,18 +89,13 @@ TimeAggregator("time-aggr",
   cl::cat(AggregatorCategory));
 
 static cl::opt<bool>
-UseEventPC("use-event-pc",
-  cl::desc("use event PC in combination with LBR sampling"),
-  cl::init(false),
-  cl::ZeroOrMore,
-  cl::cat(AggregatorCategory));
+    UseEventPC("use-event-pc",
+               cl::desc("use event PC in combination with LBR sampling"),
+               cl::cat(AggregatorCategory));
 
-static cl::opt<bool>
-WriteAutoFDOData("autofdo",
-  cl::desc("generate autofdo textual data instead of bolt data"),
-  cl::init(false),
-  cl::ZeroOrMore,
-  cl::cat(AggregatorCategory));
+static cl::opt<bool> WriteAutoFDOData(
+    "autofdo", cl::desc("generate autofdo textual data instead of bolt data"),
+    cl::cat(AggregatorCategory));
 
 } // namespace opts
 
@@ -116,6 +104,22 @@ namespace {
 const char TimerGroupName[] = "aggregator";
 const char TimerGroupDesc[] = "Aggregator";
 
+std::vector<SectionNameAndRange> getTextSections(const BinaryContext *BC) {
+  std::vector<SectionNameAndRange> sections;
+  for (BinarySection &Section : BC->sections()) {
+    if (!Section.isText())
+      continue;
+    if (Section.getSize() == 0)
+      continue;
+    sections.push_back(
+        {Section.getName(), Section.getAddress(), Section.getEndAddress()});
+  }
+  std::sort(sections.begin(), sections.end(),
+            [](const SectionNameAndRange &A, const SectionNameAndRange &B) {
+              return A.BeginAddress < B.BeginAddress;
+            });
+  return sections;
+}
 }
 
 constexpr uint64_t DataAggregator::KernelBaseAddr;
@@ -1292,7 +1296,7 @@ std::error_code DataAggregator::printLBRHeatMap() {
     opts::HeatmapMinAddress = KernelBaseAddr;
   }
   Heatmap HM(opts::HeatmapBlock, opts::HeatmapMinAddress,
-             opts::HeatmapMaxAddress);
+             opts::HeatmapMaxAddress, getTextSections(BC));
   uint64_t NumTotalSamples = 0;
 
   if (opts::BasicAggregation) {
@@ -1374,6 +1378,10 @@ std::error_code DataAggregator::printLBRHeatMap() {
     HM.printCDF(opts::OutputFilename);
   else
     HM.printCDF(opts::OutputFilename + ".csv");
+  if (opts::OutputFilename == "-")
+    HM.printSectionHotness(opts::OutputFilename);
+  else
+    HM.printSectionHotness(opts::OutputFilename + "-section-hotness.csv");
 
   return std::error_code();
 }

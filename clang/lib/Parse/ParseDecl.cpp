@@ -10,16 +10,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Parse/Parser.h"
-#include "clang/Parse/RAIIObjectsForParser.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/PrettyDeclStackTrace.h"
 #include "clang/Basic/AddressSpaces.h"
+#include "clang/Basic/AttributeCommonInfo.h"
 #include "clang/Basic/Attributes.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Parse/ParseDiagnostic.h"
+#include "clang/Parse/Parser.h"
+#include "clang/Parse/RAIIObjectsForParser.h"
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/Scope.h"
@@ -596,7 +597,7 @@ bool Parser::ParseMicrosoftDeclSpecArgs(IdentifierInfo *AttrName,
 
   // If the attribute isn't known, we will not attempt to parse any
   // arguments.
-  if (!hasAttribute(AttrSyntax::Declspec, nullptr, AttrName,
+  if (!hasAttribute(AttributeCommonInfo::Syntax::AS_Declspec, nullptr, AttrName,
                     getTargetInfo(), getLangOpts())) {
     // Eat the left paren, then skip to the ending right paren.
     ConsumeParen();
@@ -890,6 +891,15 @@ void Parser::ParseBorlandTypeAttributes(ParsedAttributes &attrs) {
 void Parser::ParseOpenCLKernelAttributes(ParsedAttributes &attrs) {
   // Treat these like attributes
   while (Tok.is(tok::kw___kernel)) {
+    IdentifierInfo *AttrName = Tok.getIdentifierInfo();
+    SourceLocation AttrNameLoc = ConsumeToken();
+    attrs.addNew(AttrName, AttrNameLoc, nullptr, AttrNameLoc, nullptr, 0,
+                 ParsedAttr::AS_Keyword);
+  }
+}
+
+void Parser::ParseCUDAFunctionAttributes(ParsedAttributes &attrs) {
+  while (Tok.is(tok::kw___noinline__)) {
     IdentifierInfo *AttrName = Tok.getIdentifierInfo();
     SourceLocation AttrNameLoc = ConsumeToken();
     attrs.addNew(AttrName, AttrNameLoc, nullptr, AttrNameLoc, nullptr, 0,
@@ -2637,8 +2647,8 @@ bool Parser::ParseImplicitInt(DeclSpec &DS, CXXScopeSpec *SS,
   // error, do lookahead to try to do better recovery. This never applies
   // within a type specifier. Outside of C++, we allow this even if the
   // language doesn't "officially" support implicit int -- we support
-  // implicit int as an extension in C99 and C11.
-  if (!isTypeSpecifier(DSC) && !getLangOpts().CPlusPlus &&
+  // implicit int as an extension in some language modes.
+  if (!isTypeSpecifier(DSC) && getLangOpts().isImplicitIntAllowed() &&
       isValidAfterIdentifierInDeclarator(NextToken())) {
     // If this token is valid for implicit int, e.g. "static x = 4", then
     // we just avoid eating the identifier, so it will be parsed as the
@@ -2860,6 +2870,8 @@ Parser::getDeclSpecContextFromDeclaratorContext(DeclaratorContext Context) {
   if (Context == DeclaratorContext::AliasDecl ||
       Context == DeclaratorContext::AliasTemplate)
     return DeclSpecContext::DSC_alias_declaration;
+  if (Context == DeclaratorContext::Association)
+    return DeclSpecContext::DSC_association;
   return DeclSpecContext::DSC_normal;
 }
 
@@ -3688,6 +3700,11 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
     // OpenCL single token adornments.
     case tok::kw___kernel:
       ParseOpenCLKernelAttributes(DS.getAttributes());
+      continue;
+
+    // CUDA/HIP single token adornments.
+    case tok::kw___noinline__:
+      ParseCUDAFunctionAttributes(DS.getAttributes());
       continue;
 
     // Nullability type specifiers.
@@ -4531,7 +4548,7 @@ void Parser::ParseEnumSpecifier(SourceLocation StartLoc, DeclSpec &DS,
   bool IsScopedUsingClassTag = false;
 
   // In C++11, recognize 'enum class' and 'enum struct'.
-  if (Tok.isOneOf(tok::kw_class, tok::kw_struct)) {
+  if (Tok.isOneOf(tok::kw_class, tok::kw_struct) && getLangOpts().CPlusPlus) {
     Diag(Tok, getLangOpts().CPlusPlus11 ? diag::warn_cxx98_compat_scoped_enum
                                         : diag::ext_scoped_enum);
     IsScopedUsingClassTag = Tok.is(tok::kw_class);
@@ -4558,7 +4575,7 @@ void Parser::ParseEnumSpecifier(SourceLocation StartLoc, DeclSpec &DS,
 
   // Determine whether this declaration is permitted to have an enum-base.
   AllowDefiningTypeSpec AllowEnumSpecifier =
-      isDefiningTypeSpecifierContext(DSC);
+      isDefiningTypeSpecifierContext(DSC, getLangOpts().CPlusPlus);
   bool CanBeOpaqueEnumDeclaration =
       DS.isEmpty() && isOpaqueEnumDeclarationContext(DSC);
   bool CanHaveEnumBase = (getLangOpts().CPlusPlus11 || getLangOpts().ObjC ||
@@ -5751,11 +5768,12 @@ void Parser::ParseTypeQualifierListOpt(
 }
 
 /// ParseDeclarator - Parse and verify a newly-initialized declarator.
-///
 void Parser::ParseDeclarator(Declarator &D) {
   /// This implements the 'declarator' production in the C grammar, then checks
   /// for well-formedness and issues diagnostics.
-  ParseDeclaratorInternal(D, &Parser::ParseDirectDeclarator);
+  Actions.runWithSufficientStackSpace(D.getBeginLoc(), [&] {
+    ParseDeclaratorInternal(D, &Parser::ParseDirectDeclarator);
+  });
 }
 
 static bool isPtrOperatorToken(tok::TokenKind Kind, const LangOptions &Lang,
@@ -5866,7 +5884,9 @@ void Parser::ParseDeclaratorInternal(Declarator &D,
       D.ExtendWithDeclSpec(DS);
 
       // Recurse to parse whatever is left.
-      ParseDeclaratorInternal(D, DirectDeclParser);
+      Actions.runWithSufficientStackSpace(D.getBeginLoc(), [&] {
+        ParseDeclaratorInternal(D, DirectDeclParser);
+      });
 
       // Sema will have to catch (syntactically invalid) pointers into global
       // scope. It has to catch pointers into namespace scope anyway.
@@ -5915,7 +5935,8 @@ void Parser::ParseDeclaratorInternal(Declarator &D,
     D.ExtendWithDeclSpec(DS);
 
     // Recursively parse the declarator.
-    ParseDeclaratorInternal(D, DirectDeclParser);
+    Actions.runWithSufficientStackSpace(
+        D.getBeginLoc(), [&] { ParseDeclaratorInternal(D, DirectDeclParser); });
     if (Kind == tok::star)
       // Remember that we parsed a pointer type, and remember the type-quals.
       D.AddTypeInfo(DeclaratorChunk::getPointer(
@@ -5960,7 +5981,8 @@ void Parser::ParseDeclaratorInternal(Declarator &D,
     }
 
     // Recursively parse the declarator.
-    ParseDeclaratorInternal(D, DirectDeclParser);
+    Actions.runWithSufficientStackSpace(
+        D.getBeginLoc(), [&] { ParseDeclaratorInternal(D, DirectDeclParser); });
 
     if (D.getNumTypeObjects() > 0) {
       // C++ [dcl.ref]p4: There shall be no references to references.

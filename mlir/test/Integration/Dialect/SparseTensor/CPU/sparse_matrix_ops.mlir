@@ -42,7 +42,7 @@ module {
     %c1 = arith.constant 1 : index
     %d0 = tensor.dim %arga, %c0 : tensor<?x?xf64, #DCSR>
     %d1 = tensor.dim %arga, %c1 : tensor<?x?xf64, #DCSR>
-    %xm = sparse_tensor.init [%d0, %d1] : tensor<?x?xf64, #DCSR>
+    %xm = bufferization.alloc_tensor(%d0, %d1) : tensor<?x?xf64, #DCSR>
     %0 = linalg.generic #trait_scale
        ins(%arga: tensor<?x?xf64, #DCSR>)
         outs(%xm: tensor<?x?xf64, #DCSR>) {
@@ -73,7 +73,7 @@ module {
     %c1 = arith.constant 1 : index
     %d0 = tensor.dim %arga, %c0 : tensor<?x?xf64, #DCSR>
     %d1 = tensor.dim %arga, %c1 : tensor<?x?xf64, #DCSR>
-    %xv = sparse_tensor.init [%d0, %d1] : tensor<?x?xf64, #DCSR>
+    %xv = bufferization.alloc_tensor(%d0, %d1) : tensor<?x?xf64, #DCSR>
     %0 = linalg.generic #trait_op
        ins(%arga, %argb: tensor<?x?xf64, #DCSR>, tensor<?x?xf64, #DCSR>)
         outs(%xv: tensor<?x?xf64, #DCSR>) {
@@ -91,7 +91,7 @@ module {
     %c1 = arith.constant 1 : index
     %d0 = tensor.dim %arga, %c0 : tensor<?x?xf64, #DCSR>
     %d1 = tensor.dim %arga, %c1 : tensor<?x?xf64, #DCSR>
-    %xv = sparse_tensor.init [%d0, %d1] : tensor<?x?xf64, #DCSR>
+    %xv = bufferization.alloc_tensor(%d0, %d1) : tensor<?x?xf64, #DCSR>
     %0 = linalg.generic #trait_op
        ins(%arga, %argb: tensor<?x?xf64, #DCSR>, tensor<?x?xf64, #DCSR>)
         outs(%xv: tensor<?x?xf64, #DCSR>) {
@@ -131,7 +131,7 @@ module {
     %sm1 = sparse_tensor.convert %m1 : tensor<4x8xf64> to tensor<?x?xf64, #DCSR>
     %sm2 = sparse_tensor.convert %m2 : tensor<4x8xf64> to tensor<?x?xf64, #DCSR>
 
-    // Call sparse vector kernels.
+    // Call sparse matrix kernels.
     %0 = call @matrix_scale(%sm1)
       : (tensor<?x?xf64, #DCSR>) -> tensor<?x?xf64, #DCSR>
     %1 = call @matrix_scale_inplace(%sm1)

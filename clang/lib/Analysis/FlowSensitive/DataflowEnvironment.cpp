@@ -15,6 +15,7 @@
 #include "clang/Analysis/FlowSensitive/DataflowEnvironment.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/Type.h"
 #include "clang/Analysis/FlowSensitive/DataflowLattice.h"
 #include "clang/Analysis/FlowSensitive/StorageLocation.h"
@@ -147,39 +148,26 @@ static void initGlobalVars(const Stmt &S, Environment &Env) {
   }
 }
 
+// FIXME: Does not precisely handle non-virtual diamond inheritance. A single
+// field decl will be modeled for all instances of the inherited field.
 static void
-getFieldsFromClassHierarchy(QualType Type, bool IgnorePrivateFields,
+getFieldsFromClassHierarchy(QualType Type,
                             llvm::DenseSet<const FieldDecl *> &Fields) {
   if (Type->isIncompleteType() || Type->isDependentType() ||
       !Type->isRecordType())
     return;
 
-  for (const FieldDecl *Field : Type->getAsRecordDecl()->fields()) {
-    if (IgnorePrivateFields &&
-        (Field->getAccess() == AS_private ||
-         (Field->getAccess() == AS_none && Type->getAsRecordDecl()->isClass())))
-      continue;
+  for (const FieldDecl *Field : Type->getAsRecordDecl()->fields())
     Fields.insert(Field);
-  }
-  if (auto *CXXRecord = Type->getAsCXXRecordDecl()) {
-    for (const CXXBaseSpecifier &Base : CXXRecord->bases()) {
-      // Ignore private fields (including default access in C++ classes) in
-      // base classes, because they are not visible in derived classes.
-      getFieldsFromClassHierarchy(Base.getType(), /*IgnorePrivateFields=*/true,
-                                  Fields);
-    }
-  }
+  if (auto *CXXRecord = Type->getAsCXXRecordDecl())
+    for (const CXXBaseSpecifier &Base : CXXRecord->bases())
+      getFieldsFromClassHierarchy(Base.getType(), Fields);
 }
 
-/// Gets the set of all fields accesible from the type.
-///
-/// FIXME: Does not precisely handle non-virtual diamond inheritance. A single
-/// field decl will be modeled for all instances of the inherited field.
-static llvm::DenseSet<const FieldDecl *>
-getAccessibleObjectFields(QualType Type) {
+/// Gets the set of all fields in the type.
+static llvm::DenseSet<const FieldDecl *> getObjectFields(QualType Type) {
   llvm::DenseSet<const FieldDecl *> Fields;
-  // Don't ignore private fields for the class itself, only its super classes.
-  getFieldsFromClassHierarchy(Type, /*IgnorePrivateFields=*/false, Fields);
+  getFieldsFromClassHierarchy(Type, Fields);
   return Fields;
 }
 
@@ -215,7 +203,12 @@ Environment::Environment(DataflowAnalysisContext &DACtx,
   }
 
   if (const auto *MethodDecl = dyn_cast<CXXMethodDecl>(&DeclCtx)) {
-    if (!MethodDecl->isStatic()) {
+    auto *Parent = MethodDecl->getParent();
+    assert(Parent != nullptr);
+    if (Parent->isLambda())
+      MethodDecl = dyn_cast<CXXMethodDecl>(Parent->getDeclContext());
+
+    if (MethodDecl && !MethodDecl->isStatic()) {
       QualType ThisPointeeType = MethodDecl->getThisObjectType();
       // FIXME: Add support for union types.
       if (!ThisPointeeType->isUnionType()) {
@@ -236,9 +229,6 @@ bool Environment::equivalentTo(const Environment &Other,
     return false;
 
   if (ExprToLoc != Other.ExprToLoc)
-    return false;
-
-  if (MemberLocToStruct != Other.MemberLocToStruct)
     return false;
 
   // Compare the contents for the intersection of their domains.
@@ -321,9 +311,8 @@ StorageLocation &Environment::createStorageLocation(QualType Type) {
     // FIXME: Explore options to avoid eager initialization of fields as some of
     // them might not be needed for a particular analysis.
     llvm::DenseMap<const ValueDecl *, StorageLocation *> FieldLocs;
-    for (const FieldDecl *Field : getAccessibleObjectFields(Type)) {
+    for (const FieldDecl *Field : getObjectFields(Type))
       FieldLocs.insert({Field, &createStorageLocation(Field->getType())});
-    }
     return takeOwnership(
         std::make_unique<AggregateStorageLocation>(Type, std::move(FieldLocs)));
   }
@@ -364,14 +353,15 @@ StorageLocation *Environment::getStorageLocation(const ValueDecl &D,
 }
 
 void Environment::setStorageLocation(const Expr &E, StorageLocation &Loc) {
-  assert(ExprToLoc.find(&E) == ExprToLoc.end());
-  ExprToLoc[&E] = &Loc;
+  const Expr &CanonE = ignoreCFGOmittedNodes(E);
+  assert(ExprToLoc.find(&CanonE) == ExprToLoc.end());
+  ExprToLoc[&CanonE] = &Loc;
 }
 
 StorageLocation *Environment::getStorageLocation(const Expr &E,
                                                  SkipPast SP) const {
   // FIXME: Add a test with parens.
-  auto It = ExprToLoc.find(E.IgnoreParens());
+  auto It = ExprToLoc.find(&ignoreCFGOmittedNodes(E));
   return It == ExprToLoc.end() ? nullptr : &skip(*It->second, SP);
 }
 
@@ -388,7 +378,7 @@ void Environment::setValue(const StorageLocation &Loc, Value &Val) {
     const QualType Type = AggregateLoc.getType();
     assert(Type->isStructureOrClassType());
 
-    for (const FieldDecl *Field : getAccessibleObjectFields(Type)) {
+    for (const FieldDecl *Field : getObjectFields(Type)) {
       assert(Field != nullptr);
       StorageLocation &FieldLoc = AggregateLoc.getChild(*Field);
       MemberLocToStruct[&FieldLoc] = std::make_pair(StructVal, Field);
@@ -504,7 +494,7 @@ Value *Environment::createValueUnlessSelfReferential(
     // FIXME: Initialize only fields that are accessed in the context that is
     // being analyzed.
     llvm::DenseMap<const ValueDecl *, Value *> FieldValues;
-    for (const FieldDecl *Field : getAccessibleObjectFields(Type)) {
+    for (const FieldDecl *Field : getObjectFields(Type)) {
       assert(Field != nullptr);
 
       QualType FieldType = Field->getType();

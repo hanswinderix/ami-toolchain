@@ -141,7 +141,7 @@ static cl::opt<InliningAdvisorMode> UseInlineAdvisor(
                           "Use release mode (AOT-compiled model).")));
 
 static cl::opt<bool> EnableSyntheticCounts(
-    "enable-npm-synthetic-counts", cl::init(false), cl::Hidden, cl::ZeroOrMore,
+    "enable-npm-synthetic-counts", cl::Hidden,
     cl::desc("Run synthetic function entry count generation "
              "pass"));
 
@@ -151,8 +151,7 @@ static cl::opt<bool>
                             cl::Hidden,
                             cl::desc("Enable inline deferral during PGO"));
 
-static cl::opt<bool> EnableMemProfiler("enable-mem-prof", cl::init(false),
-                                       cl::Hidden, cl::ZeroOrMore,
+static cl::opt<bool> EnableMemProfiler("enable-mem-prof", cl::Hidden,
                                        cl::desc("Enable memory profiler"));
 
 static cl::opt<bool> EnableModuleInliner("enable-module-inliner",
@@ -160,13 +159,13 @@ static cl::opt<bool> EnableModuleInliner("enable-module-inliner",
                                          cl::desc("Enable module inliner"));
 
 static cl::opt<bool> PerformMandatoryInliningsFirst(
-    "mandatory-inlining-first", cl::init(true), cl::Hidden, cl::ZeroOrMore,
+    "mandatory-inlining-first", cl::init(true), cl::Hidden,
     cl::desc("Perform mandatory inlinings module-wide, before performing "
              "inlining."));
 
 static cl::opt<bool> EnableO3NonTrivialUnswitching(
     "enable-npm-O3-nontrivial-unswitch", cl::init(true), cl::Hidden,
-    cl::ZeroOrMore, cl::desc("Enable non-trivial loop unswitching for -O3"));
+    cl::desc("Enable non-trivial loop unswitching for -O3"));
 
 static cl::opt<bool> EnableEagerlyInvalidateAnalyses(
     "eagerly-invalidate-analyses", cl::init(true), cl::Hidden,
@@ -989,6 +988,8 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
   else
     MPM.addPass(buildInlinerPipeline(Level, Phase));
 
+  MPM.addPass(CoroCleanupPass());
+
   if (EnableMemProfiler && Phase != ThinOrFullLTOPhase::ThinLTOPreLink) {
     MPM.addPass(createModuleToFunctionPassAdaptor(MemProfilerPass()));
     MPM.addPass(ModuleMemProfilerPass());
@@ -1246,8 +1247,6 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   OptimizePM.addPass(
       SimplifyCFGPass(SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
 
-  OptimizePM.addPass(CoroCleanupPass());
-
   // Add the core optimizing pipeline.
   MPM.addPass(createModuleToFunctionPassAdaptor(std::move(OptimizePM),
                                                 PTO.EagerlyInvalidateAnalyses));
@@ -1371,11 +1370,6 @@ PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
 
   // Reduce the size of the IR as much as possible.
   MPM.addPass(GlobalOptPass());
-
-  // Module simplification splits coroutines, but does not fully clean up
-  // coroutine intrinsics. To ensure ThinLTO optimization passes don't trip up
-  // on these, we schedule the cleanup here.
-  MPM.addPass(createModuleToFunctionPassAdaptor(CoroCleanupPass()));
 
   if (PGOOpt && PGOOpt->PseudoProbeForProfiling &&
       PGOOpt->Action == PGOOptions::SampleUse)
@@ -1622,7 +1616,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   FPM.addPass(InstCombinePass());
   invokePeepholeEPCallbacks(FPM, Level);
 
-  FPM.addPass(JumpThreadingPass(/*InsertFreezeWhenUnfoldingSelect*/ true));
+  FPM.addPass(JumpThreadingPass());
 
   // Do a post inline PGO instrumentation and use pass. This is a context
   // sensitive PGO pass.
@@ -1706,7 +1700,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
       createModuleToPostOrderCGSCCPassAdaptor(OpenMPOptCGSCCPass()));
 
   invokePeepholeEPCallbacks(MainFPM, Level);
-  MainFPM.addPass(JumpThreadingPass(/*InsertFreezeWhenUnfoldingSelect*/ true));
+  MainFPM.addPass(JumpThreadingPass());
   MPM.addPass(createModuleToFunctionPassAdaptor(std::move(MainFPM),
                                                 PTO.EagerlyInvalidateAnalyses));
 
@@ -1841,7 +1835,7 @@ ModulePassManager PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
   CGSCCPassManager CGPM;
   CGPM.addPass(CoroSplitPass());
   CoroPM.addPass(createModuleToPostOrderCGSCCPassAdaptor(std::move(CGPM)));
-  CoroPM.addPass(createModuleToFunctionPassAdaptor(CoroCleanupPass()));
+  CoroPM.addPass(CoroCleanupPass());
   CoroPM.addPass(GlobalDCEPass());
   MPM.addPass(CoroConditionalWrapper(std::move(CoroPM)));
 

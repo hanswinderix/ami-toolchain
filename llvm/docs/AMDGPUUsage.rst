@@ -16,6 +16,7 @@ User Guide for AMDGPU Backend
    AMDGPU/AMDGPUAsmGFX906
    AMDGPU/AMDGPUAsmGFX908
    AMDGPU/AMDGPUAsmGFX90a
+   AMDGPU/AMDGPUAsmGFX940
    AMDGPU/AMDGPUAsmGFX10
    AMDGPU/AMDGPUAsmGFX1011
    AMDGPU/AMDGPUAsmGFX1013
@@ -3627,17 +3628,17 @@ Code object V5 metadata is the same as
                                                        is 1 or 2, then must be 1.
 
                                                      "hidden_remainder_x"
-                                                       The grid dispatch work group size of the the partial work group
+                                                       The grid dispatch work group size of the partial work group
                                                        of the X dimension, if it exists. Must be zero if a partial
                                                        work group does not exist in the X dimension.
 
                                                      "hidden_remainder_y"
-                                                       The grid dispatch work group size of the the partial work group
+                                                       The grid dispatch work group size of the partial work group
                                                        of the Y dimension, if it exists. Must be zero if a partial
                                                        work group does not exist in the Y dimension.
 
                                                      "hidden_remainder_z"
-                                                       The grid dispatch work group size of the the partial work group
+                                                       The grid dispatch work group size of the partial work group
                                                        of the Z dimension, if it exists. Must be zero if a partial
                                                        work group does not exist in the Z dimension.
 
@@ -14242,8 +14243,14 @@ in this description.
 
                                                                 :doc:`gfx909<AMDGPU/AMDGPUAsmGFX900>`
 
+                                                                :doc:`gfx90c<AMDGPU/AMDGPUAsmGFX900>`
+
     CDNA 1        :doc:`GFX9<AMDGPU/AMDGPUAsmGFX9>`             :doc:`gfx908<AMDGPU/AMDGPUAsmGFX908>`
+
     CDNA 2        :doc:`GFX9<AMDGPU/AMDGPUAsmGFX9>`             :doc:`gfx90a<AMDGPU/AMDGPUAsmGFX90a>`
+
+    CDNA 3        :doc:`GFX9<AMDGPU/AMDGPUAsmGFX9>`             :doc:`gfx940<AMDGPU/AMDGPUAsmGFX940>`
+
     RDNA 1        :doc:`GFX10 RDNA1<AMDGPU/AMDGPUAsmGFX10>`     :doc:`gfx1010<AMDGPU/AMDGPUAsmGFX10>`
 
                                                                 :doc:`gfx1011<AMDGPU/AMDGPUAsmGFX1011>`

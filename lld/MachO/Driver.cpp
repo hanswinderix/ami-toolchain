@@ -642,12 +642,27 @@ static PlatformType parsePlatformVersions(const ArgList &args) {
     return PLATFORM_UNKNOWN;
   }
   if (platformVersions.size() == 2) {
-    // FIXME: If you implement support for this, add a diagnostic if
-    // outputType is not dylib or bundle -- linkers shouldn't be able to
-    // write zippered executables.
-    warn("writing zippered outputs not yet implemented, "
-         "ignoring all but last -platform_version flag");
+    bool isZipperedCatalyst = platformVersions.count(PLATFORM_MACOS) &&
+                              platformVersions.count(PLATFORM_MACCATALYST);
+
+    if (!isZipperedCatalyst) {
+      error("lld supports writing zippered outputs only for "
+            "macos and mac-catalyst");
+    } else if (config->outputType != MH_DYLIB &&
+               config->outputType != MH_BUNDLE) {
+      error("writing zippered outputs only valid for -dylib and -bundle");
+    } else {
+      config->platformInfo.minimum = platformVersions[PLATFORM_MACOS].minimum;
+      config->platformInfo.sdk = platformVersions[PLATFORM_MACOS].sdk;
+      config->secondaryPlatformInfo = PlatformInfo{};
+      config->secondaryPlatformInfo->minimum =
+          platformVersions[PLATFORM_MACCATALYST].minimum;
+      config->secondaryPlatformInfo->sdk =
+          platformVersions[PLATFORM_MACCATALYST].sdk;
+    }
+    return PLATFORM_MACOS;
   }
+
   config->platformInfo.minimum = lastVersionInfo->minimum;
   config->platformInfo.sdk = lastVersionInfo->sdk;
   return lastVersionInfo->platform;
@@ -664,6 +679,10 @@ static TargetInfo *createTargetInfo(InputArgList &args) {
   PlatformType platform = parsePlatformVersions(args);
   config->platformInfo.target =
       MachO::Target(getArchitectureFromName(archName), platform);
+  if (config->secondaryPlatformInfo) {
+    config->secondaryPlatformInfo->target =
+        MachO::Target(getArchitectureFromName(archName), PLATFORM_MACCATALYST);
+  }
 
   uint32_t cpuType;
   uint32_t cpuSubtype;
@@ -720,9 +739,6 @@ static ICFLevel getICFLevel(const ArgList &args) {
   if (icfLevel == ICFLevel::unknown) {
     warn(Twine("unknown --icf=OPTION `") + icfLevelStr +
          "', defaulting to `none'");
-    icfLevel = ICFLevel::none;
-  } else if (icfLevel == ICFLevel::safe) {
-    warn(Twine("`--icf=safe' is not yet implemented, reverting to `none'"));
     icfLevel = ICFLevel::none;
   }
   return icfLevel;
@@ -922,26 +938,30 @@ bool SymbolPatterns::match(StringRef symbolName) const {
   return matchLiteral(symbolName) || matchGlob(symbolName);
 }
 
+static void parseSymbolPatternsFile(const Arg *arg,
+                                    SymbolPatterns &symbolPatterns) {
+  StringRef path = arg->getValue();
+  Optional<MemoryBufferRef> buffer = readFile(path);
+  if (!buffer) {
+    error("Could not read symbol file: " + path);
+    return;
+  }
+  MemoryBufferRef mbref = *buffer;
+  for (StringRef line : args::getLines(mbref)) {
+    line = line.take_until([](char c) { return c == '#'; }).trim();
+    if (!line.empty())
+      symbolPatterns.insert(line);
+  }
+}
+
 static void handleSymbolPatterns(InputArgList &args,
                                  SymbolPatterns &symbolPatterns,
                                  unsigned singleOptionCode,
                                  unsigned listFileOptionCode) {
   for (const Arg *arg : args.filtered(singleOptionCode))
     symbolPatterns.insert(arg->getValue());
-  for (const Arg *arg : args.filtered(listFileOptionCode)) {
-    StringRef path = arg->getValue();
-    Optional<MemoryBufferRef> buffer = readFile(path);
-    if (!buffer) {
-      error("Could not read symbol file: " + path);
-      continue;
-    }
-    MemoryBufferRef mbref = *buffer;
-    for (StringRef line : args::getLines(mbref)) {
-      line = line.take_until([](char c) { return c == '#'; }).trim();
-      if (!line.empty())
-        symbolPatterns.insert(line);
-    }
-  }
+  for (const Arg *arg : args.filtered(listFileOptionCode))
+    parseSymbolPatternsFile(arg, symbolPatterns);
 }
 
 static void createFiles(const InputArgList &args) {
@@ -1131,6 +1151,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
 
   config = std::make_unique<Configuration>();
   symtab = std::make_unique<SymbolTable>();
+  config->outputType = getOutputType(args);
   target = createTargetInfo(args);
   depTracker = std::make_unique<DependencyTracker>(
       args.getLastArgValue(OPT_dependency_info));
@@ -1237,7 +1258,6 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
   config->printEachFile = args.hasArg(OPT_t);
   config->printWhyLoad = args.hasArg(OPT_why_load);
   config->omitDebugInfo = args.hasArg(OPT_S);
-  config->outputType = getOutputType(args);
   config->errorForArchMismatch = args.hasArg(OPT_arch_errors_fatal);
   if (const Arg *arg = args.getLastArg(OPT_bundle_loader)) {
     if (config->outputType != MH_BUNDLE)
@@ -1390,9 +1410,52 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
           ">>> ignoring unexports");
     config->unexportedSymbols.clear();
   }
+
+  // Imitating LD64's:
+  // -non_global_symbols_no_strip_list and -non_global_symbols_strip_list can't
+  // both be present.
+  // But -x can be used with either of these two, in which case, the last arg
+  // takes effect.
+  // (TODO: This is kind of confusing - considering disallowing using them
+  // together for a more straightforward behaviour)
+  {
+    bool includeLocal = false;
+    bool excludeLocal = false;
+    for (const Arg *arg :
+         args.filtered(OPT_x, OPT_non_global_symbols_no_strip_list,
+                       OPT_non_global_symbols_strip_list)) {
+      switch (arg->getOption().getID()) {
+      case OPT_x:
+        config->localSymbolsPresence = SymtabPresence::None;
+        break;
+      case OPT_non_global_symbols_no_strip_list:
+        if (excludeLocal) {
+          error("cannot use both -non_global_symbols_no_strip_list and "
+                "-non_global_symbols_strip_list");
+        } else {
+          includeLocal = true;
+          config->localSymbolsPresence = SymtabPresence::SelectivelyIncluded;
+          parseSymbolPatternsFile(arg, config->localSymbolPatterns);
+        }
+        break;
+      case OPT_non_global_symbols_strip_list:
+        if (includeLocal) {
+          error("cannot use both -non_global_symbols_no_strip_list and "
+                "-non_global_symbols_strip_list");
+        } else {
+          excludeLocal = true;
+          config->localSymbolsPresence = SymtabPresence::SelectivelyExcluded;
+          parseSymbolPatternsFile(arg, config->localSymbolPatterns);
+        }
+        break;
+      default:
+        llvm_unreachable("unexpected option");
+      }
+    }
+  }
   // Explicitly-exported literal symbols must be defined, but might
-  // languish in an archive if unreferenced elsewhere. Light a fire
-  // under those lazy symbols!
+  // languish in an archive if unreferenced elsewhere or if they are in the
+  // non-global strip list. Light a fire under those lazy symbols!
   for (const CachedHashStringRef &cachedName : config->exportedSymbols.literals)
     symtab->addUndefined(cachedName.val(), /*file=*/nullptr,
                          /*isWeakRef=*/false);
@@ -1503,7 +1566,7 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
                 // The former can be exported but the latter cannot.
                 defined->privateExtern = false;
               } else {
-                warn("cannot export hidden symbol " + symbolName +
+                warn("cannot export hidden symbol " + toString(*defined) +
                      "\n>>> defined in " + toString(defined->getFile()));
               }
             }
@@ -1545,8 +1608,11 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
     // ICF assumes that all literals have been folded already, so we must run
     // foldIdenticalLiterals before foldIdenticalSections.
     foldIdenticalLiterals();
-    if (config->icfLevel != ICFLevel::none)
+    if (config->icfLevel != ICFLevel::none) {
+      if (config->icfLevel == ICFLevel::safe)
+        markAddrSigSymbols();
       foldIdenticalSections();
+    }
 
     // Write to an output file.
     if (target->wordSize == 8)

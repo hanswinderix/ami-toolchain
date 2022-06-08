@@ -377,6 +377,10 @@ static void InitializeStandardPredefinedMacros(const TargetInfo &TI,
     Builder.defineMacro("__HLSL_VERSION",
                         Twine((unsigned)LangOpts.getHLSLVersion()));
 
+    if (LangOpts.NativeHalfType)
+      Builder.defineMacro("__HLSL_ENABLE_16_BIT",
+                          Twine((unsigned)LangOpts.getHLSLVersion()));
+
     // Shader target information
     // "enums" for shader stages
     Builder.defineMacro("__SHADER_STAGE_VERTEX",
@@ -686,7 +690,7 @@ static void InitializeCPlusPlusFeatureTestMacros(const LangOptions &LangOpts,
     Builder.defineMacro("__cpp_implicit_move", "202011L");
     Builder.defineMacro("__cpp_size_t_suffix", "202011L");
     Builder.defineMacro("__cpp_if_consteval", "202106L");
-    Builder.defineMacro("__cpp_­multidimensional_­subscript", "202110L");
+    Builder.defineMacro("__cpp_multidimensional_subscript", "202110L");
   }
   if (LangOpts.Char8)
     Builder.defineMacro("__cpp_char8_t", "201811L");
@@ -1249,6 +1253,7 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
     case 52:
       Builder.defineMacro("_OPENMP", "202111");
       break;
+    case 50:
     default:
       // Default version is OpenMP 5.0
       Builder.defineMacro("_OPENMP", "201811");
@@ -1387,5 +1392,5 @@ void clang::InitializePreprocessor(
                              InitOpts.PrecompiledPreambleBytes.second);
 
   // Copy PredefinedBuffer into the Preprocessor.
-  PP.setPredefines(Predefines.str());
+  PP.setPredefines(std::move(PredefineBuffer));
 }

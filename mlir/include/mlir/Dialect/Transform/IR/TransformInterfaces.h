@@ -74,6 +74,10 @@ public:
   /// This is helpful for transformations that apply to a particular handle.
   ArrayRef<Operation *> getPayloadOps(Value value) const;
 
+  /// Returns the Transform IR handle for the given Payload IR op if it exists
+  /// in the state, null otherwise.
+  Value getHandleForPayloadOp(Operation *op) const;
+
   /// Applies the transformation specified by the given transform op and updates
   /// the state accordingly.
   LogicalResult applyTransform(TransformOpInterface transform);
@@ -185,6 +189,10 @@ public:
     /// Provides read-only access to the parent TransformState object.
     const TransformState &getTransformState() const { return state; }
 
+    /// Replaces the given payload op with another op. If the replacement op is
+    /// null, removes the association of the payload op with its handle.
+    LogicalResult replacePayloadOp(Operation *op, Operation *replacement);
+
   private:
     /// Back-reference to the state that is being extended.
     TransformState &state;
@@ -276,9 +284,17 @@ private:
   /// The callback function is called once per associated operation and is
   /// expected to return the modified operation or nullptr. In the latter case,
   /// the corresponding operation is no longer associated with the transform IR
-  /// value.
-  void updatePayloadOps(Value value,
-                        function_ref<Operation *(Operation *)> callback);
+  /// value. May fail if the operation produced by the update callback is
+  /// already associated with a different Transform IR handle value.
+  LogicalResult
+  updatePayloadOps(Value value,
+                   function_ref<Operation *(Operation *)> callback);
+
+  /// Attempts to record the mapping between the given Payload IR operation and
+  /// the given Transform IR handle. Fails and reports an error if the operation
+  /// is already tracked by another handle.
+  static LogicalResult tryEmplaceReverseMapping(Mappings &map, Operation *op,
+                                                Value handle);
 
   /// The mappings between transform IR values and payload IR ops, aggregated by
   /// the region in which the transform IR values are defined.
@@ -381,6 +397,31 @@ public:
   }
 };
 
+/// Trait implementing the TransformOpInterface for operations applying a
+/// transformation to a single operation handle and producing a single operation
+/// handle. The op must implement a method with one of the following signatures:
+///   - FailureOr<convertible-to-Operation*> applyToOne(OpTy)
+///   - LogicalResult applyToOne(OpTy)
+/// to perform a transformation that is applied in turn to all payload IR
+/// operations that correspond to the handle of the transform IR operation.
+/// In the functions above, OpTy is either Operation * or a concrete payload IR
+/// Op class that the transformation is applied to (NOT the class of the
+/// transform IR op). The op is expected to have one operand and zero or one
+/// results.
+template <typename OpTy>
+class TransformEachOpTrait
+    : public OpTrait::TraitBase<OpTy, TransformEachOpTrait> {
+public:
+  /// Calls `applyToOne` for every payload operation associated with the operand
+  /// of this transform IR op. If `applyToOne` returns ops, associates them with
+  /// the result of this transform op.
+  LogicalResult apply(TransformResults &transformResults,
+                      TransformState &state);
+
+  /// Checks that the op matches the expectations of this trait.
+  static LogicalResult verifyTrait(Operation *op);
+};
+
 /// Side effect resource corresponding to the mapping between Transform IR
 /// values and Payload IR operations. An Allocate effect from this resource
 /// means creating a new mapping entry, it is always accompanied by a Write
@@ -410,9 +451,150 @@ struct PayloadIRResource
   StringRef getName() override { return "transform.payload_ir"; }
 };
 
+/// Trait implementing the MemoryEffectOpInterface for single-operand
+/// single-result operations that "consume" their operand and produce a new
+/// result.
+template <typename OpTy>
+class FunctionalStyleTransformOpTrait
+    : public OpTrait::TraitBase<OpTy, FunctionalStyleTransformOpTrait> {
+public:
+  /// This op "consumes" the operand by reading and freeing it, "produces" the
+  /// result by allocating and writing it and reads/writes the payload IR in the
+  /// process.
+  void getEffects(SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         this->getOperation()->getOperand(0),
+                         TransformMappingResource::get());
+    effects.emplace_back(MemoryEffects::Free::get(),
+                         this->getOperation()->getOperand(0),
+                         TransformMappingResource::get());
+    effects.emplace_back(MemoryEffects::Allocate::get(),
+                         this->getOperation()->getResult(0),
+                         TransformMappingResource::get());
+    effects.emplace_back(MemoryEffects::Write::get(),
+                         this->getOperation()->getResult(0),
+                         TransformMappingResource::get());
+    effects.emplace_back(MemoryEffects::Read::get(), PayloadIRResource::get());
+    effects.emplace_back(MemoryEffects::Write::get(), PayloadIRResource::get());
+  }
+
+  /// Checks that the op matches the expectations of this trait.
+  static LogicalResult verifyTrait(Operation *op) {
+    static_assert(OpTy::template hasTrait<OpTrait::OneOperand>(),
+                  "expected single-operand op");
+    static_assert(OpTy::template hasTrait<OpTrait::OneResult>(),
+                  "expected single-result op");
+    if (!op->getName().getInterface<MemoryEffectOpInterface>()) {
+      op->emitError()
+          << "FunctionalStyleTransformOpTrait should only be attached to ops "
+             "that implement MemoryEffectOpInterface";
+    }
+    return success();
+  }
+};
+
 } // namespace transform
 } // namespace mlir
 
 #include "mlir/Dialect/Transform/IR/TransformInterfaces.h.inc"
+
+namespace mlir {
+namespace transform {
+namespace detail {
+/// Appends `result` to the vector assuming it corresponds to the success state
+/// in `FailureOr<convertible-to-Operation*>`. If `result` is just a
+/// `LogicalResult`, does nothing.
+template <typename Ty>
+std::enable_if_t<std::is_same<Ty, LogicalResult>::value, LogicalResult>
+appendTransformResultToVector(Ty result,
+                              SmallVectorImpl<Operation *> &results) {
+  return result;
+}
+template <typename Ty>
+std::enable_if_t<!std::is_same<Ty, LogicalResult>::value, LogicalResult>
+appendTransformResultToVector(Ty result,
+                              SmallVectorImpl<Operation *> &results) {
+  static_assert(
+      std::is_convertible<typename Ty::value_type, Operation *>::value,
+      "expected transform function to return operations");
+  if (failed(result))
+    return failure();
+
+  results.push_back(*result);
+  return success();
+}
+
+/// Applies a one-to-one transform to each of the given targets. Puts the
+/// results of transforms, if any, in `results` in the same order. Fails if any
+/// of the application fails. Individual transforms must be callable with
+/// one of the following signatures:
+///   - FailureOr<convertible-to-Operation*>(OpTy)
+///   - LogicalResult(OpTy)
+/// where OpTy is either
+///   - Operation *, in which case the transform is always applied;
+///   - a concrete Op class, in which case a check is performed whether
+///   `targets` contains operations of the same class and a failure is reported
+///   if it does not.
+template <typename FnTy>
+LogicalResult applyTransformToEach(ArrayRef<Operation *> targets,
+                                   SmallVectorImpl<Operation *> &results,
+                                   FnTy transform) {
+  using OpTy = typename llvm::function_traits<FnTy>::template arg_t<0>;
+  static_assert(std::is_convertible<OpTy, Operation *>::value,
+                "expected transform function to take an operation");
+  using RetTy = typename llvm::function_traits<FnTy>::result_t;
+  static_assert(std::is_convertible<RetTy, LogicalResult>::value,
+                "expected transform function to return LogicalResult or "
+                "FailureOr<convertible-to-Operation*>");
+  for (Operation *target : targets) {
+    auto specificOp = dyn_cast<OpTy>(target);
+    if (!specificOp)
+      return failure();
+
+    auto result = transform(specificOp);
+    if (failed(appendTransformResultToVector(result, results)))
+      return failure();
+  }
+  return success();
+}
+} // namespace detail
+} // namespace transform
+} // namespace mlir
+
+template <typename OpTy>
+mlir::LogicalResult mlir::transform::TransformEachOpTrait<OpTy>::apply(
+    TransformResults &transformResults, TransformState &state) {
+  using TransformOpType = typename llvm::function_traits<
+      decltype(&OpTy::applyToOne)>::template arg_t<0>;
+  ArrayRef<Operation *> targets =
+      state.getPayloadOps(this->getOperation()->getOperand(0));
+  SmallVector<Operation *> results;
+  if (failed(detail::applyTransformToEach(
+          targets, results, [&](TransformOpType specificOp) {
+            return static_cast<OpTy *>(this)->applyToOne(specificOp);
+          })))
+    return failure();
+  if (OpTy::template hasTrait<OpTrait::OneResult>()) {
+    transformResults.set(
+        this->getOperation()->getResult(0).template cast<OpResult>(), results);
+  }
+  return success();
+}
+
+template <typename OpTy>
+mlir::LogicalResult
+mlir::transform::TransformEachOpTrait<OpTy>::verifyTrait(Operation *op) {
+  static_assert(OpTy::template hasTrait<OpTrait::OneOperand>(),
+                "expected single-operand op");
+  static_assert(OpTy::template hasTrait<OpTrait::OneResult>() ||
+                    OpTy::template hasTrait<OpTrait::ZeroResults>(),
+                "expected zero- or single-result op");
+  if (!op->getName().getInterface<TransformOpInterface>()) {
+    return op->emitError() << "TransformEachOpTrait should only be attached to "
+                              "ops that implement TransformOpInterface";
+  }
+
+  return success();
+}
 
 #endif // DIALECT_TRANSFORM_IR_TRANSFORMINTERFACES_H

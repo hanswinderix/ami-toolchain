@@ -50,7 +50,7 @@ module {
     %s = arith.constant 2.0 : f64
     %c = arith.constant 0 : index
     %d = tensor.dim %arga, %c : tensor<?xf64, #SparseVector>
-    %xv = sparse_tensor.init [%d] : tensor<?xf64, #SparseVector>
+    %xv = bufferization.alloc_tensor(%d) : tensor<?xf64, #SparseVector>
     %0 = linalg.generic #trait_scale
        ins(%arga: tensor<?xf64, #SparseVector>)
         outs(%xv: tensor<?xf64, #SparseVector>) {
@@ -79,7 +79,7 @@ module {
                    %argb: tensor<?xf64, #SparseVector>) -> tensor<?xf64, #SparseVector> {
     %c = arith.constant 0 : index
     %d = tensor.dim %arga, %c : tensor<?xf64, #SparseVector>
-    %xv = sparse_tensor.init [%d] : tensor<?xf64, #SparseVector>
+    %xv = bufferization.alloc_tensor(%d) : tensor<?xf64, #SparseVector>
     %0 = linalg.generic #trait_op
        ins(%arga, %argb: tensor<?xf64, #SparseVector>, tensor<?xf64, #SparseVector>)
         outs(%xv: tensor<?xf64, #SparseVector>) {
@@ -95,7 +95,7 @@ module {
                    %argb: tensor<?xf64, #SparseVector>) -> tensor<?xf64, #SparseVector> {
     %c = arith.constant 0 : index
     %d = tensor.dim %arga, %c : tensor<?xf64, #SparseVector>
-    %xv = sparse_tensor.init [%d] : tensor<?xf64, #SparseVector>
+    %xv = bufferization.alloc_tensor(%d) : tensor<?xf64, #SparseVector>
     %0 = linalg.generic #trait_op
        ins(%arga, %argb: tensor<?xf64, #SparseVector>, tensor<?xf64, #SparseVector>)
         outs(%xv: tensor<?xf64, #SparseVector>) {
@@ -111,7 +111,7 @@ module {
                      %argb: tensor<?xf64, #SparseVector>) -> tensor<?xf64, #DenseVector> {
     %c = arith.constant 0 : index
     %d = tensor.dim %arga, %c : tensor<?xf64, #SparseVector>
-    %xv = sparse_tensor.init [%d] : tensor<?xf64, #DenseVector>
+    %xv = bufferization.alloc_tensor(%d) : tensor<?xf64, #DenseVector>
     %0 = linalg.generic #trait_op
        ins(%arga, %argb: tensor<?xf64, #SparseVector>, tensor<?xf64, #SparseVector>)
         outs(%xv: tensor<?xf64, #DenseVector>) {
@@ -125,13 +125,13 @@ module {
   // Sum reduces dot product of two sparse vectors.
   func.func @vector_dotprod(%arga: tensor<?xf64, #SparseVector>,
                        %argb: tensor<?xf64, #SparseVector>,
-		       %argx: tensor<f64> {linalg.inplaceable = true}) -> tensor<f64> {
+                       %argx: tensor<f64> {linalg.inplaceable = true}) -> tensor<f64> {
     %0 = linalg.generic #trait_dot
        ins(%arga, %argb: tensor<?xf64, #SparseVector>, tensor<?xf64, #SparseVector>)
         outs(%argx: tensor<f64>) {
         ^bb(%a: f64, %b: f64, %x: f64):
           %1 = arith.mulf %a, %b : f64
-	  %2 = arith.addf %x, %1 : f64
+          %2 = arith.addf %x, %1 : f64
           linalg.yield %2 : f64
     } -> tensor<f64>
     return %0 : tensor<f64>

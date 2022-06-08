@@ -89,6 +89,29 @@ func.func @view(%arg0 : index, %arg1 : index, %arg2 : index) {
 
 // -----
 
+// CHECK-LABL: func @view_empty_memref(
+// CHECK:        %[[ARG0:.*]]: index,
+// CHECK:        %[[ARG1:.*]]: memref<0xi8>)
+func.func @view_empty_memref(%offset: index, %mem: memref<0xi8>) {
+
+  // CHECK: llvm.mlir.undef : !llvm.struct<(ptr<f32>, ptr<f32>, i64, array<2 x i64>, array<2 x i64>)>
+  // CHECK: llvm.mlir.constant(0 : index) : i64
+  // CHECK: llvm.insertvalue %{{.*}}, %{{.*}}[2] : !llvm.struct<(ptr<f32>, ptr<f32>, i64, array<2 x i64>, array<2 x i64>)>
+  // CHECK: llvm.mlir.constant(4 : index) : i64
+  // CHECK: llvm.insertvalue %{{.*}}, %{{.*}}[3, 1] : !llvm.struct<(ptr<f32>, ptr<f32>, i64, array<2 x i64>, array<2 x i64>)>
+  // CHECK: llvm.mlir.constant(0 : index) : i64
+  // CHECK: llvm.insertvalue %{{.*}}, %{{.*}}[4, 1] : !llvm.struct<(ptr<f32>, ptr<f32>, i64, array<2 x i64>, array<2 x i64>)>
+  // CHECK: llvm.mlir.constant(0 : index) : i64
+  // CHECK: llvm.insertvalue %{{.*}}, %{{.*}}[3, 0] : !llvm.struct<(ptr<f32>, ptr<f32>, i64, array<2 x i64>, array<2 x i64>)>
+  // CHECK: llvm.mlir.constant(0 : index) : i64
+  // CHECK: = llvm.insertvalue %{{.*}}, %{{.*}}[4, 0] : !llvm.struct<(ptr<f32>, ptr<f32>, i64, array<2 x i64>, array<2 x i64>)>
+  %0 = memref.view %mem[%offset][] : memref<0xi8> to memref<0x4xf32>
+
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func @subview(
 // CHECK:         %[[MEM:.*]]: memref<{{.*}}>,
 // CHECK:         %[[ARG0f:[a-zA-Z0-9]*]]: index,
@@ -1047,6 +1070,20 @@ func.func @memref_copy_contiguous(%in: memref<16x2xi32>, %offset: index) {
   // CHECK: [[GEP2:%.*]] = llvm.getelementptr [[EXTRACT2P]][[[EXTRACT2O]]] : (!llvm.ptr<i32>, i64) -> !llvm.ptr<i32>
   // CHECK: [[VOLATILE:%.*]] = llvm.mlir.constant(false) : i1
   // CHECK: "llvm.intr.memcpy"([[GEP2]], [[GEP1]], [[SIZE]], [[VOLATILE]]) : (!llvm.ptr<i32>, !llvm.ptr<i32>, i64, i1) -> ()
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func @memref_copy_0d_offset
+#map0 = affine_map<(d0) -> (d0 + 1)>
+#map1 = affine_map<() -> (1)>
+func.func @memref_copy_0d_offset(%in: memref<2xi32>) {
+  %buf = memref.alloc() : memref<i32>
+  %sub = memref.subview %in[1] [1] [1] : memref<2xi32> to memref<1xi32, #map0>
+  %scalar = memref.collapse_shape %sub [] : memref<1xi32, #map0> into memref<i32, #map1>
+  memref.copy %scalar, %buf : memref<i32, #map1> to memref<i32>
+  // CHECK: llvm.intr.memcpy
   return
 }
 
