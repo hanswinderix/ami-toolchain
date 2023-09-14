@@ -27,7 +27,7 @@ NICE = nice
 #############################################################################
 
 LLVM_REPO = git@github.com:llvm/llvm-project.git
-LLVM_FORK = git@gitlab.kuleuven.be:u0126303/llvm-project.git
+LLVM_FORK = git@github.com:hanswinderix/ami-toochain.git
 
 SRCDIR_LLVM   = $(MAKEFILE_DIR)llvm
 SRCDIR_CLANG  = $(MAKEFILE_DIR)clang
